@@ -31,6 +31,12 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from PIL import Image
+from tqdm.auto import tqdm
+
+# EfficientNet is pretrained on ImageNet, so its RGB channels expect this normalisation.
+# The two physics channels are kept in [0, 1] (a common choice for auxiliary maps).
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -121,3 +127,78 @@ def mean_transmission(img, patch: int = 15, omega: float = 0.95) -> float:
     before modelling.
     """
     return float(transmission_map(img, patch=patch, omega=omega).mean())
+
+
+# ---------------------------------------------------------------------------
+# 5-channel input assembly (paper Sec 3.5) — RGB + transmission + inverted saturation
+# ---------------------------------------------------------------------------
+def compute_maps(img, size=224, patch=15, omega=0.95, top_frac=0.001, t_min=0.05):
+    """Resize the photo to `size`x`size`, then return (rgb01, transmission, inv_sat).
+
+    We resize FIRST so every image — whatever its original aspect ratio — yields maps at
+    a fixed, consistent scale (the audit found widths of 1024 but varying heights).
+    All three outputs are float in [0, 1]: rgb01 is (size, size, 3); the two maps are
+    (size, size).
+    """
+    rgb = np.asarray(Image.fromarray(
+        (to_float_rgb(img) * 255).astype(np.uint8)).resize((size, size), Image.BILINEAR),
+        dtype=np.float32) / 255.0
+    t = transmission_map(rgb, patch=patch, omega=omega, top_frac=top_frac, t_min=t_min)
+    s = inverted_saturation(rgb)
+    return rgb, t, s
+
+
+def assemble_five_channel(rgb01, t01, s01, imagenet_norm=True) -> np.ndarray:
+    """Stack into a (5, H, W) float32 tensor: normalised RGB + transmission + inv-sat."""
+    rgb = (rgb01 - IMAGENET_MEAN) / IMAGENET_STD if imagenet_norm else rgb01
+    hwc = np.concatenate([rgb, t01[..., None], s01[..., None]], axis=2)
+    return np.transpose(hwc, (2, 0, 1)).astype(np.float32)
+
+
+def five_channel(img, size=224, patch=15, omega=0.95, top_frac=0.001, t_min=0.05,
+                 imagenet_norm=True) -> np.ndarray:
+    """One-shot: photo -> (5, size, size) model input. Used by inference/demo (no cache)."""
+    rgb, t, s = compute_maps(img, size, patch, omega, top_frac, t_min)
+    return assemble_five_channel(rgb, t, s, imagenet_norm)
+
+
+# ---------------------------------------------------------------------------
+# disk cache for the two physics maps (paper Sec 3.5: "computed once and cached")
+# ---------------------------------------------------------------------------
+def build_map_cache(n, get_image, out_path, size=224, patch=15, omega=0.95,
+                    top_frac=0.001, t_min=0.05, progress=True) -> str:
+    """Precompute transmission + inverted-saturation for `n` images and memmap to disk.
+
+    Stored as uint8 (maps are in [0,1] -> x255) in a single array of shape
+    (n, 2, size, size), indexed by dataset position. Recomputing the Dark Channel Prior
+    every training epoch would be far too slow, so we do it once. `get_image(i)` must
+    return the PIL image for dataset position i. ~1.1 GB for the full dataset.
+    """
+    cache = np.lib.format.open_memmap(
+        out_path, mode="w+", dtype=np.uint8, shape=(n, 2, size, size))
+    it = tqdm(range(n), desc="caching physics maps") if progress else range(n)
+    for i in it:
+        _, t, s = compute_maps(get_image(i), size, patch, omega, top_frac, t_min)
+        cache[i, 0] = np.clip(t * 255, 0, 255).astype(np.uint8)
+        cache[i, 1] = np.clip(s * 255, 0, 255).astype(np.uint8)
+    cache.flush()
+    return out_path
+
+
+def load_map_cache(path):
+    """Open a cached map array read-only (memory-mapped, so it doesn't load into RAM)."""
+    return np.load(path, mmap_mode="r")
+
+
+def five_channel_cached(img, cache, row, size=224, imagenet_norm=True) -> np.ndarray:
+    """Assemble the 5-channel input using cached maps (fast path for training).
+
+    `img` is the PIL photo (RGB is cheap to decode+resize); the two physics maps are read
+    from `cache[row]` instead of recomputed.
+    """
+    rgb = np.asarray(Image.fromarray(
+        (to_float_rgb(img) * 255).astype(np.uint8)).resize((size, size), Image.BILINEAR),
+        dtype=np.float32) / 255.0
+    t = cache[row, 0].astype(np.float32) / 255.0
+    s = cache[row, 1].astype(np.float32) / 255.0
+    return assemble_five_channel(rgb, t, s, imagenet_norm)
