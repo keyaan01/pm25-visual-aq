@@ -422,8 +422,240 @@ from cache). **Next:** `04_model.ipynb` — the EfficientNet-B0 backbone widened
 input channels, with three monotone quantile heads."""),
 ]
 
+# ===========================================================================
+# 04_model.ipynb
+# ===========================================================================
+MODEL = [
+    ("md", """# Phase 4 — The model
+
+**Why (paper §3.6):** we use **EfficientNet-B0**, a compact CNN pretrained on ImageNet.
+It's small (trains on our budget), its pretrained features help given our modest data,
+and it's the strongest published baseline on PM25Vision — so our numbers are directly
+comparable. Two tweaks:
+
+1. **5-channel stem.** The first layer normally takes 3 channels (RGB). We widen it to 5
+   (RGB + transmission + inverted saturation); `timm` seeds the two new channels from the
+   pretrained RGB weights.
+2. **Three monotone quantile heads.** We predict the 5th/50th/95th percentiles. To stop a
+   "95th below the 50th" nonsense, we build them so each is the previous one **plus a
+   strictly positive step** (`softplus`). They can never cross — guaranteed, not checked."""),
+
+    ("md", BOOTSTRAP_MD),
+    ("code", BOOTSTRAP),
+
+    ("code", """import torch
+from src.config import load_config
+from src import model as M
+cfg = load_config()
+
+net = M.build_model(cfg)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+net = net.to(device)
+print("device:", device)
+print("backbone:", cfg["model"]["backbone"], "| input channels:", net.backbone.conv_stem.in_channels)
+print("trainable parameters: %.2f M" % (M.count_parameters(net) / 1e6))"""),
+
+    ("md", """## Check the head can't produce crossing bounds
+
+We push a batch of random 5-channel inputs through the model and confirm every sample
+comes out **ascending** (q05 ≤ q50 ≤ q95). This holds for *any* input, by construction."""),
+    ("code", """net.eval()
+with torch.no_grad():
+    y = net(torch.randn(8, cfg["model"]["in_chans"], cfg["data"]["image_size"], cfg["data"]["image_size"]).to(device))
+print("output shape (batch, quantiles):", tuple(y.shape))
+print("first sample (q05, q50, q95) in log-space:", [round(v, 3) for v in y[0].tolist()])
+print("all samples ascending:", bool(torch.all(y[:, 1:] >= y[:, :-1])))"""),
+
+    ("md", """## What's next
+
+The model outputs three ordered numbers in **log(AQI)** space. Phase 5 trains it with the
+**pinball loss** (so each head learns its percentile) on the log target, using only the
+physics-safe augmentations. **Next:** `05_train.ipynb`."""),
+]
+
+# ===========================================================================
+# 05_train.ipynb
+# ===========================================================================
+TRAIN = [
+    ("md", """# Phase 5 — Training
+
+**Why (paper §3.7, §3.12):** we train the three quantile heads with the **pinball loss**
+so each head learns its percentile, on the **log(AQI)** target (the label is right-skewed,
+so a few extreme days would otherwise dominate). Settings mirror the paper: AdamW
+(lr 3e-4), cosine schedule with 2 warm-up epochs, batch 32, ≤40 epochs with early
+stopping, mixed precision.
+
+> ⏳ This is the long step — on a Colab T4 GPU, expect ~20–40 minutes. Make sure the GPU
+> is on (Runtime → Change runtime type → T4) and the physics cache from Phase 3 exists."""),
+
+    ("md", BOOTSTRAP_MD),
+    ("code", BOOTSTRAP),
+
+    ("code", """import os, torch, matplotlib.pyplot as plt
+from src.config import load_config
+from src import data, splits, physics, dataset as D, model as M, train as T
+cfg = load_config()
+T.set_seed(cfg["seed"])
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("device:", device)
+
+SOURCE = cfg["data"]["drive_path"]        # laptop test: "tests/fixture_ds"
+STRATEGY = cfg["split"]["strategy"]        # station_grouped (primary)
+
+ds, df = data.load_clean(SOURCE, from_disk=True, seed=cfg["seed"])
+sp = splits.make_splits(df, strategy=STRATEGY, seed=cfg["seed"],
+                        station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
+                        lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
+print("split:", STRATEGY, "->", sp["split"].value_counts().to_dict())"""),
+
+    ("md", """## Load the cached maps and build the data loaders
+
+If the physics cache is missing, run `03_physics_features.ipynb` first."""),
+    ("code", """cache_path = os.path.join(cfg["data"]["cache_dir"], "physics_maps_%d.npy" % cfg["data"]["image_size"])
+assert os.path.exists(cache_path), "Physics cache missing — run 03_physics_features.ipynb first."
+cache = physics.load_map_cache(cache_path)
+
+loaders = D.make_dataloaders(ds, sp, cache, cfg, num_workers=2)
+print("batches:", {k: len(v) for k, v in loaders.items()})"""),
+
+    ("md", "## Train\nThe best model (lowest calibration loss) is saved to your Drive."),
+    ("code", """net = M.build_model(cfg).to(device)
+out_dir = os.path.join(cfg["data"]["outputs_dir"], STRATEGY)
+history = T.train_model(net, loaders, cfg, device=device, out_dir=out_dir)
+print("best epoch:", history["best_epoch"] + 1, "| best cal loss:", round(history["best_cal_loss"], 4))
+print("checkpoint:", history["checkpoint"])"""),
+
+    ("md", "## Learning curves\nTrain and calibration loss should fall and then flatten; early stopping keeps the best."),
+    ("code", """plt.figure(figsize=(7,4))
+plt.plot(history["train_loss"], label="train")
+plt.plot(history["cal_loss"], label="calibration")
+plt.axvline(history["best_epoch"], ls="--", c="grey", label="best")
+plt.xlabel("epoch"); plt.ylabel("pinball loss (log-AQI)"); plt.legend()
+plt.title("Training curves"); plt.show()"""),
+
+    ("md", """## What's next
+
+We now have a trained model whose three outputs are *ordered* but **not yet guaranteed**
+to contain the truth 90% of the time. **Next:** `06_calibrate_evaluate.ipynb` — conformal
+calibration to earn that guarantee, then the full metrics."""),
+]
+
+# ===========================================================================
+# 06_calibrate_evaluate.ipynb
+# ===========================================================================
+EVAL = [
+    ("md", """# Phase 6 — Calibration + Evaluation  (completes the core pipeline)
+
+**Why (paper §3.8, §3.11):** the trained model's three outputs are *ordered* but not yet
+*guaranteed* to contain the truth 90% of the time. **Conformal prediction** earns that
+guarantee using the held-out calibration set:
+
+1. On calibration, measure how far each truth fell outside the predicted range.
+2. Take the 90% mark of those misses → a single number **Q**.
+3. Widen every interval by **Q** (clip the lower end at 0).
+
+Then we report the full metrics — all in **AQI points** — and, if you trained more than one
+split strategy, compare them side by side to expose the leakage gap."""),
+
+    ("md", BOOTSTRAP_MD),
+    ("code", BOOTSTRAP),
+
+    ("code", """import os, json, numpy as np, matplotlib.pyplot as plt
+from src.config import load_config
+from src import data, splits, physics, dataset as D, model as M, train as T
+from src import calibrate as C, metrics as Mx
+cfg = load_config()
+device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+
+SOURCE = cfg["data"]["drive_path"]        # laptop test: "tests/fixture_ds"
+ds, df = data.load_clean(SOURCE, from_disk=True, seed=cfg["seed"])
+cache = physics.load_map_cache(os.path.join(cfg["data"]["cache_dir"], "physics_maps_%d.npy" % cfg["data"]["image_size"]))
+out_root = cfg["data"]["outputs_dir"]; os.makedirs(out_root, exist_ok=True)
+print("device:", device)"""),
+
+    ("md", """## Evaluate a trained model
+
+`evaluate_strategy` rebuilds that split, loads its checkpoint, predicts on calibration and
+test, computes **Q** from calibration, applies it to test, and returns the metrics. It also
+saves **Q** next to the checkpoint so the demo (Phase 10) can reuse it."""),
+    ("code", """def evaluate_strategy(strategy):
+    sp = splits.make_splits(df, strategy=strategy, seed=cfg["seed"],
+            station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
+            lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
+    loaders = D.make_dataloaders(ds, sp, cache, cfg, num_workers=2)
+    net = M.build_model(cfg).to(device)
+    T.load_checkpoint(os.path.join(out_root, strategy, "best_model.pth"), net, map_location=device)
+    lg = cfg["train"]["log_target"]
+    cal_p, cal_y = T.collect_predictions(net, loaders["cal"], device, lg)
+    test_p, test_y = T.collect_predictions(net, loaders["test"], device, lg)
+    Q = C.conformal_Q(cal_p, cal_y, cfg["calibration"]["coverage"])
+    json.dump({"Q": Q}, open(os.path.join(out_root, strategy, "conformal_Q.json"), "w"))
+    cal_test = C.apply_conformal(test_p, Q)
+    return {"strategy": strategy, "Q": Q,
+            "raw_coverage": C.coverage(test_p, test_y),
+            "report": Mx.full_report(cal_test, test_y, cfg["calibration"]["coverage"]),
+            "preds": cal_test, "y": test_y}
+
+primary = evaluate_strategy(cfg["split"]["strategy"])
+print("strategy:", primary["strategy"], "| conformal Q = %.1f AQI" % primary["Q"])
+print("coverage: raw %.3f -> calibrated %.3f (target %.2f)"
+      % (primary["raw_coverage"], primary["report"]["coverage"], cfg["calibration"]["coverage"]))
+{k: round(v,3) for k,v in primary["report"].items()}"""),
+
+    ("md", "## Where is the model weak?\nErrors broken down by true-AQI band — the visual signal is weakest at low pollution."),
+    ("code", """ebm = Mx.error_by_magnitude(primary["y"], primary["preds"][:,1])
+display(ebm)
+plt.figure(figsize=(7,3)); plt.bar(ebm["band"], ebm["MAE"]); plt.ylabel("MAE (AQI)"); plt.xlabel("true AQI band")
+plt.title("Error by pollution level"); plt.show()
+
+plt.figure(figsize=(7,3)); plt.hist(primary["preds"][:,2]-primary["preds"][:,0], bins=40)
+plt.xlabel("interval width (AQI)"); plt.ylabel("count"); plt.title("Calibrated interval widths"); plt.show()"""),
+
+    ("md", """## A few example predictions
+
+Each point is a test photo: the dot is the predicted median, the bar is the calibrated
+90% interval, and the ✕ is the truth. Most truths should sit inside their bars."""),
+    ("code", """import numpy as np
+idx = np.argsort(primary["y"])[::max(1, len(primary["y"])//40)][:40]
+p, y = primary["preds"][idx], primary["y"][idx]
+xs = np.arange(len(idx))
+plt.figure(figsize=(9,4))
+plt.vlines(xs, p[:,0], p[:,2], color="#4C78A8", lw=3, alpha=0.5, label="90% interval")
+plt.plot(xs, p[:,1], "o", ms=4, color="#4C78A8", label="median")
+plt.plot(xs, y, "x", ms=6, color="#E45756", label="truth")
+plt.legend(); plt.xlabel("test photos (sorted by true AQI)"); plt.ylabel("AQI"); plt.title("Predictions vs truth"); plt.show()"""),
+
+    ("md", """## Leakage gap: compare every split you trained
+
+If you trained more than one split strategy (e.g. re-ran `05_train` with
+`split.strategy: random`), this tabulates them side by side. **`random` should look better
+than `station_grouped`** — that difference is leakage inflation, measured not assumed."""),
+    ("code", """import pandas as pd
+avail = [s for s in ["station_grouped","random","geographic","temporal"]
+         if os.path.exists(os.path.join(out_root, s, "best_model.pth"))]
+rows = []
+for s in avail:
+    r = evaluate_strategy(s)
+    rows.append({"strategy": s, **{k: round(v,3) for k,v in r["report"].items()}})
+table = pd.DataFrame(rows).set_index("strategy")
+table.to_csv(os.path.join(out_root, "results_by_split.csv"))
+table"""),
+
+    ("md", """## Core pipeline complete ✓
+
+You now have: leakage-safe evaluation, a physics-guided model, and **calibrated intervals
+with ~90% coverage**, all in AQI points. Paste me this notebook's numbers and I'll sanity-check
+them and write them into `docs/RESULTS.md`.
+
+**Next (contributions):** `07_error_ceiling` (C2 — how much error is unavoidable) and
+`08_abstention` (C3 — refusing to answer on unusable inputs)."""),
+]
+
 if __name__ == "__main__":
     build("00_setup.ipynb", SETUP)
     build("01_data_audit.ipynb", AUDIT)
     build("02_splits.ipynb", SPLITS)
     build("03_physics_features.ipynb", PHYSICS)
+    build("04_model.ipynb", MODEL)
+    build("05_train.ipynb", TRAIN)
+    build("06_calibrate_evaluate.ipynb", EVAL)

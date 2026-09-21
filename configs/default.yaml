@@ -8,6 +8,7 @@ data:
   hf_repo: DeadCardassian/PM25Vision
   drive_path: /content/drive/MyDrive/pm25vision   # where 00_setup saved the dataset
   cache_dir: /content/drive/MyDrive/pm25_cache    # cached physics maps live here
+  outputs_dir: /content/drive/MyDrive/pm25_outputs # checkpoints, figures, result tables (survive Colab sessions)
   image_size: 224                      # resize target (paper Sec 3.12)
   target_col: pm25                     # the AQI label (1-530, NOT ug/m3)
   station_col: station_id

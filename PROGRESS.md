@@ -4,8 +4,10 @@
 > later session, **read this first**, then `docs/` for details and the approved plan at
 > `~/.claude/plans/this-is-the-output-steady-hearth.md`.
 
-**Last updated:** Phases 0–2 complete; notebook bootstrap fixed (self-cloning). Next:
-Phase 3 (physics features / 5-channel caching).
+**Last updated:** **Core pipeline complete (Phases 0–6)**, all locally smoke-tested on the
+fixture. Phase 1 confirmed on the full dataset in Colab. Awaiting the user's full Colab run
+(Phase 3 cache → Phase 5 train on GPU → Phase 6 eval). Next to build: C2 (Phase 7), C3
+(Phase 8), demo (Phase 10).
 
 ## What this project is (30-second version)
 
@@ -31,10 +33,10 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,219 rows, 3,261 stations).
 | 0 | Setup (repo, deps, Colab, Drive) | ✅ built + locally tested; awaiting user's first Colab run |
 | 1 | Data load + clean + audit (§3.2–3.3) | ✅ built + locally tested |
 | 2 | Leakage-safe splits (§3.4) | ✅ built + locally tested (4 strategies; grouped/geo verified 0-straddle) |
-| 3 | Physics features / 5-channel input (§3.5) | core physics fns exist in `src/physics.py`; caching + notebook TODO |
-| 4 | Model — EfficientNet-B0 + monotone quantiles (§3.6) | TODO |
-| 5 | Training — pinball loss, log target (§3.7, §3.12) | TODO |
-| 6 | Conformal calibration + evaluation (§3.8, §3.11) | TODO — **completes core** |
+| 3 | Physics features / 5-channel input (§3.5) | ✅ built + tested (`five_channel`, `build_map_cache` uint8, cache==on-the-fly) |
+| 4 | Model — EfficientNet-B0 + monotone quantiles (§3.6) | ✅ built + tested (5-ch stem, monotone by construction, pretrained load OK) |
+| 5 | Training — pinball loss, log target (§3.7, §3.12) | ✅ built + tested (CPU mini-run: losses/dataset/train chain) |
+| 6 | Conformal calibration + evaluation (§3.8, §3.11) | ✅ built + tested (conformal hits 0.90 on synthetic; full train→eval integration) — **core done** |
 | 7 | C2 error ceiling via OpenAQ (§3.10) | TODO (after core) |
 | 8 | C3 abstention via ExDark/DTD/Indoor (§3.9) | TODO (after core) |
 | 9 | Ablations (§3.11) | TODO |
@@ -58,6 +60,10 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,219 rows, 3,261 stations).
 
 ## Immediate next step
 
-Build Phase 3: `src/physics.py` already has transmission + inverted-saturation; add a
-`five_channel_tensor(img, size)` + a disk cache of the two maps, `03_physics_features.ipynb`
-(visualise maps), `docs/03_physics_features.md`. Then Phase 4 (model).
+Core is built. On the user's side: run the full Colab pipeline (03 cache → 05 train on GPU →
+06 evaluate) and paste numbers. On Claude's side: build **Phase 7 (C2 error ceiling via
+OpenAQ)**, **Phase 8 (C3 abstention via ExDark/DTD/Indoor)**, then **Phase 10 (Gradio demo)**.
+Write real Colab numbers into `docs/RESULTS.md` when they arrive.
+
+## Test commands (laptop, no GPU)
+`python tests/_build_fixture.py` then `python tests/smoke_phase1.py` and `python tests/smoke_core.py`.
