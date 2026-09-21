@@ -1,0 +1,48 @@
+# Single source of truth for every knob in the project.
+# Values marked "(paper Sec ...)" come straight from the paper's Implementation
+# details so our run is faithful and reproducible.
+
+seed: 42                               # fixed everywhere for reproducibility (paper Sec 3.12)
+
+data:
+  hf_repo: DeadCardassian/PM25Vision
+  drive_path: /content/drive/MyDrive/pm25vision   # where 00_setup saved the dataset
+  cache_dir: /content/drive/MyDrive/pm25_cache    # cached physics maps live here
+  image_size: 224                      # resize target (paper Sec 3.12)
+  target_col: pm25                     # the AQI label (1-530, NOT ug/m3)
+  station_col: station_id
+  time_col: captured_at
+  lon_col: longitude
+  lat_col: latitude
+
+split:                                  # train / calibration / test (paper Sec 3.4)
+  train: 0.65
+  calibration: 0.15
+  test: 0.20
+  strategy: station_grouped            # station_grouped | random | geographic | temporal
+
+physics:                                # Dark Channel Prior + inverted saturation (paper Sec 3.5)
+  dcp_patch: 15                        # local patch size for the dark channel
+  dcp_omega: 0.95                      # haze-retention constant (He et al. 2011)
+  atmos_top_frac: 0.001               # brightest 0.1% used to estimate atmospheric light
+  t_min: 0.05                         # floor on transmission to keep it well-behaved
+
+model:                                  # EfficientNet-B0 (paper Sec 3.6)
+  backbone: efficientnet_b0
+  in_chans: 5                          # R, G, B, transmission, inverted-saturation
+  pretrained: true
+
+quantiles: [0.05, 0.50, 0.95]           # the three heads (paper Sec 3.6-3.7)
+
+train:                                  # optimisation (paper Sec 3.12)
+  lr: 0.0003
+  weight_decay: 0.0001
+  batch_size: 32
+  max_epochs: 40
+  warmup_epochs: 2
+  early_stop_patience: 6
+  amp: true                            # mixed precision
+  log_target: true                     # train on log(AQI), invert at prediction (paper Sec 3.7)
+
+calibration:                            # Conformalized Quantile Regression (paper Sec 3.8)
+  coverage: 0.90                       # target: true value inside interval >= 90% of the time

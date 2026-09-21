@@ -1,0 +1,25 @@
+# Data + outputs are large and/or licensed (CC-BY-4.0 imagery) -- never commit them.
+data/
+outputs/
+tests/fixture_ds/
+*.pth
+*.pt
+*.ckpt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Notebooks / editors
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+
+# Secrets (e.g. OpenAQ / Kaggle API keys) -- keep these out of git
+.env
+*.key
+kaggle.json
