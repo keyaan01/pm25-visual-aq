@@ -48,6 +48,19 @@ def full_report(preds: np.ndarray, y_true: np.ndarray, target: float = 0.90) -> 
     return out
 
 
+def report(point_pred: np.ndarray, interval_preds: np.ndarray, y_true: np.ndarray,
+           target: float = 0.90) -> dict:
+    """Headline numbers using the dedicated point head for accuracy + quantiles for intervals.
+
+    point_pred    : (N,) smeared point estimate in AQI (drives MAE/RMSE/R²/category accuracy).
+    interval_preds: (N, 3) conformally-calibrated [q05, q50, q95] in AQI (drives coverage/width).
+    """
+    out = point_metrics(y_true, point_pred)
+    out.update(interval_metrics(interval_preds, y_true, target))
+    out["category_accuracy"] = category_accuracy(y_true, point_pred)
+    return out
+
+
 def category_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Accuracy of predicted EPA category (Good, Moderate, …) from the median."""
     t = np.array([aqi_category_index(v) for v in y_true])

@@ -14,6 +14,7 @@ ordinary absolute error. One loss, three percentiles, three behaviours.
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 
 def pinball_loss(preds: torch.Tensor, target: torch.Tensor, quantiles) -> torch.Tensor:
@@ -29,3 +30,18 @@ def pinball_loss(preds: torch.Tensor, target: torch.Tensor, quantiles) -> torch.
     error = target - preds                                # (B, Q)
     loss = torch.maximum(q * error, (q - 1.0) * error)    # asymmetric penalty
     return loss.mean()
+
+
+def combined_loss(out: dict, target: torch.Tensor, quantiles,
+                  point_weight: float = 1.0, huber_delta: float = 1.0) -> torch.Tensor:
+    """Total training loss = pinball(quantile heads) + point_weight * Huber(point head).
+
+    `out` is the model's dict output ({"quantiles", optional "point"}). The point head is
+    trained with the **Huber loss** — like squared error near the target but linear for large
+    errors, so it chases the mean for accuracy (good R²) without letting the rare extreme days
+    blow up the gradients. Both heads work in the log-AQI space; `target` is log(AQI).
+    """
+    loss = pinball_loss(out["quantiles"], target, quantiles)
+    if "point" in out and point_weight > 0:
+        loss = loss + point_weight * F.huber_loss(out["point"], target, delta=huber_delta)
+    return loss

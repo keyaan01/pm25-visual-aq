@@ -455,16 +455,20 @@ print("device:", device)
 print("backbone:", cfg["model"]["backbone"], "| input channels:", net.backbone.conv_stem.in_channels)
 print("trainable parameters: %.2f M" % (M.count_parameters(net) / 1e6))"""),
 
-    ("md", """## Check the head can't produce crossing bounds
+    ("md", """## Two outputs: quantiles (for intervals) + a point estimate (for accuracy)
 
-We push a batch of random 5-channel inputs through the model and confirm every sample
-comes out **ascending** (q05 ≤ q50 ≤ q95). This holds for *any* input, by construction."""),
+The model returns a dict: **`quantiles`** (the three ordered bounds — for the interval) and
+**`point`** (a dedicated estimate trained with Huber loss — for the accuracy numbers; see
+Phase 5b). We confirm the quantiles come out **ascending** (q05 ≤ q50 ≤ q95) for any input, by
+construction."""),
     ("code", """net.eval()
 with torch.no_grad():
-    y = net(torch.randn(8, cfg["model"]["in_chans"], cfg["data"]["image_size"], cfg["data"]["image_size"]).to(device))
-print("output shape (batch, quantiles):", tuple(y.shape))
-print("first sample (q05, q50, q95) in log-space:", [round(v, 3) for v in y[0].tolist()])
-print("all samples ascending:", bool(torch.all(y[:, 1:] >= y[:, :-1])))"""),
+    out = net(torch.randn(8, cfg["model"]["in_chans"], cfg["data"]["image_size"], cfg["data"]["image_size"]).to(device))
+q = out["quantiles"]
+print("output keys:", list(out.keys()))
+print("quantiles shape (batch, 3):", tuple(q.shape), "| point shape (batch,):", tuple(out["point"].shape))
+print("first sample (q05, q50, q95) in log-space:", [round(v, 3) for v in q[0].tolist()])
+print("all samples ascending:", bool(torch.all(q[:, 1:] >= q[:, :-1])))"""),
 
     ("md", """## What's next
 
@@ -486,7 +490,11 @@ so a few extreme days would otherwise dominate). Settings mirror the paper: Adam
 stopping, mixed precision.
 
 > ⏳ This is the long step — on a Colab T4 GPU, expect ~20–40 minutes. Make sure the GPU
-> is on (Runtime → Change runtime type → T4) and the physics cache from Phase 3 exists."""),
+> is on (Runtime → Change runtime type → T4) and the physics cache from Phase 3 exists.
+
+**Accuracy upgrades on by default (Phase 5b):** a dedicated Huber **point-head** for the
+accuracy numbers, **class-balanced sampling** (more rare high-AQI photos), and more epochs —
+all set in `configs/default.yaml`. These target the extreme-AQI underprediction from the first run."""),
 
     ("md", BOOTSTRAP_MD),
     ("code", BOOTSTRAP),
@@ -575,53 +583,60 @@ print("device:", device)"""),
 
     ("md", """## Evaluate a trained model
 
-`evaluate_strategy` rebuilds that split, loads its checkpoint, predicts on calibration and
-test, computes **Q** from calibration, applies it to test, and returns the metrics. It also
-saves **Q** next to the checkpoint so the demo (Phase 10) can reuse it."""),
-    ("code", """def evaluate_strategy(strategy):
+`evaluate_strategy` rebuilds that split, loads its checkpoint, and predicts on calibration +
+test. **Accuracy** (MAE/RMSE/R²) comes from the **point head** with the smearing bias-correction;
+the **interval** (coverage/width) comes from the conformal-calibrated quantiles. It saves **Q**
+and the **smearing factor** next to the checkpoint so the demo (Phase 10) can reuse them."""),
+    ("code", """import numpy as np
+def evaluate_strategy(strategy):
     sp = splits.make_splits(df, strategy=strategy, seed=cfg["seed"],
             station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
             lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
     loaders = D.make_dataloaders(ds, sp, cache, cfg, num_workers=2)
     net = M.build_model(cfg).to(device)
     T.load_checkpoint(os.path.join(out_root, strategy, "best_model.pth"), net, map_location=device)
-    lg = cfg["train"]["log_target"]
-    cal_p, cal_y = T.collect_predictions(net, loaders["cal"], device, lg)
-    test_p, test_y = T.collect_predictions(net, loaders["test"], device, lg)
-    Q = C.conformal_Q(cal_p, cal_y, cfg["calibration"]["coverage"])
-    json.dump({"Q": Q}, open(os.path.join(out_root, strategy, "conformal_Q.json"), "w"))
-    cal_test = C.apply_conformal(test_p, Q)
-    return {"strategy": strategy, "Q": Q,
-            "raw_coverage": C.coverage(test_p, test_y),
-            "report": Mx.full_report(cal_test, test_y, cfg["calibration"]["coverage"]),
-            "preds": cal_test, "y": test_y}
+    cal = T.collect_outputs(net, loaders["cal"], device)
+    test = T.collect_outputs(net, loaders["test"], device)
+    # accuracy: smeared point head
+    smear = C.smearing_factor(cal["point_log"], cal["y_log"])
+    point = C.apply_point(test["point_log"], smear)
+    # intervals: conformal-calibrated quantiles
+    Q = C.conformal_Q(np.exp(cal["q_log"]), np.exp(cal["y_log"]), cfg["calibration"]["coverage"])
+    intervals = C.apply_conformal(np.exp(test["q_log"]), Q)
+    y = np.exp(test["y_log"])
+    json.dump({"Q": Q, "smear": smear},
+              open(os.path.join(out_root, strategy, "conformal_Q.json"), "w"))
+    return {"strategy": strategy, "Q": Q, "smear": smear, "point": point,
+            "intervals": intervals, "y": y,
+            "raw_coverage": C.coverage(np.exp(test["q_log"]), y),
+            "report": Mx.report(point, intervals, y, cfg["calibration"]["coverage"])}
 
 primary = evaluate_strategy(cfg["split"]["strategy"])
-print("strategy:", primary["strategy"], "| conformal Q = %.1f AQI" % primary["Q"])
+print("strategy:", primary["strategy"], "| Q = %.1f AQI | smearing = %.3f" % (primary["Q"], primary["smear"]))
 print("coverage: raw %.3f -> calibrated %.3f (target %.2f)"
       % (primary["raw_coverage"], primary["report"]["coverage"], cfg["calibration"]["coverage"]))
 {k: round(v,3) for k,v in primary["report"].items()}"""),
 
-    ("md", "## Where is the model weak?\nErrors broken down by true-AQI band — the visual signal is weakest at low pollution."),
-    ("code", """ebm = Mx.error_by_magnitude(primary["y"], primary["preds"][:,1])
+    ("md", "## Where is the model weak?\nErrors (of the point estimate) broken down by true-AQI band — watch the high-AQI bands, which Phase 5b targets."),
+    ("code", """ebm = Mx.error_by_magnitude(primary["y"], primary["point"])
 display(ebm)
 plt.figure(figsize=(7,3)); plt.bar(ebm["band"], ebm["MAE"]); plt.ylabel("MAE (AQI)"); plt.xlabel("true AQI band")
 plt.title("Error by pollution level"); plt.show()
 
-plt.figure(figsize=(7,3)); plt.hist(primary["preds"][:,2]-primary["preds"][:,0], bins=40)
+w = primary["intervals"][:,2]-primary["intervals"][:,0]
+plt.figure(figsize=(7,3)); plt.hist(w, bins=40)
 plt.xlabel("interval width (AQI)"); plt.ylabel("count"); plt.title("Calibrated interval widths"); plt.show()"""),
 
     ("md", """## A few example predictions
 
-Each point is a test photo: the dot is the predicted median, the bar is the calibrated
-90% interval, and the ✕ is the truth. Most truths should sit inside their bars."""),
-    ("code", """import numpy as np
-idx = np.argsort(primary["y"])[::max(1, len(primary["y"])//40)][:40]
-p, y = primary["preds"][idx], primary["y"][idx]
+Each column is a test photo: the dot is the point estimate, the bar is the calibrated 90%
+interval, and the ✕ is the truth. Most truths should sit inside their bars."""),
+    ("code", """idx = np.argsort(primary["y"])[::max(1, len(primary["y"])//40)][:40]
+iv, pt, y = primary["intervals"][idx], primary["point"][idx], primary["y"][idx]
 xs = np.arange(len(idx))
 plt.figure(figsize=(9,4))
-plt.vlines(xs, p[:,0], p[:,2], color="#4C78A8", lw=3, alpha=0.5, label="90% interval")
-plt.plot(xs, p[:,1], "o", ms=4, color="#4C78A8", label="median")
+plt.vlines(xs, iv[:,0], iv[:,2], color="#4C78A8", lw=3, alpha=0.5, label="90% interval")
+plt.plot(xs, pt, "o", ms=4, color="#4C78A8", label="point estimate")
 plt.plot(xs, y, "x", ms=6, color="#E45756", label="truth")
 plt.legend(); plt.xlabel("test photos (sorted by true AQI)"); plt.ylabel("AQI"); plt.title("Predictions vs truth"); plt.show()"""),
 
@@ -651,6 +666,85 @@ them and write them into `docs/RESULTS.md`.
 `08_abstention` (C3 — refusing to answer on unusable inputs)."""),
 ]
 
+# ===========================================================================
+# 07_error_ceiling.ipynb  (C2)
+# ===========================================================================
+CEILING = [
+    ("md", """# Phase 7 — C2: the unavoidable-error ceiling
+
+**Why (paper §3.10):** our labels are **daily averages**, but each photo is an **instant**.
+Pollution genuinely swings within a day, so even a *perfect* model reading the exact
+instantaneous pollution from a photo would be "wrong" versus a daily-average label. That
+gap is noise no model can beat — a hard ceiling on achievable R².
+
+We estimate it as **R²_max = 1 − Var(ε) / Var(y)**, where `Var(y)` is the variance of our
+daily-average AQI labels and `Var(ε)` is the *average within-day variance* of AQI, measured
+from **hourly** reference data (OpenAQ). This tells us how much room actually remains above
+the published R²=0.55."""),
+
+    ("md", BOOTSTRAP_MD),
+    ("code", BOOTSTRAP),
+
+    ("md", """## Get a free OpenAQ API key (2 minutes)
+
+1. Go to **https://explore.openaq.org** → sign up (free).
+2. Open your **account → API keys** and copy your key.
+3. Paste it below. (It's kept only in this session — don't commit it.)"""),
+    ("code", """OPENAQ_API_KEY = "PASTE_YOUR_OPENAQ_KEY_HERE"   # <-- from explore.openaq.org
+assert OPENAQ_API_KEY != "PASTE_YOUR_OPENAQ_KEY_HERE", "Add your OpenAQ API key first." """),
+
+    ("md", """## Fetch hourly PM2.5 from a global sample of stations
+
+We pull ~40 stations' hourly readings over a recent 45-day window. Exact matching to
+PM25Vision's stations isn't needed — we want a defensible estimate of typical within-day
+AQI variance."""),
+    ("code", """import datetime as dt
+from src import ceiling as CE
+to = dt.date.today()
+frm = to - dt.timedelta(days=45)
+hourly = CE.fetch_openaq_hourly(OPENAQ_API_KEY,
+                                date_from=frm.isoformat(), date_to=to.isoformat(),
+                                n_locations=40)
+print("hourly rows fetched:", len(hourly), "| stations:", hourly["location_id"].nunique())
+hourly.head()"""),
+
+    ("md", "## Compute Var(ε) and the ceiling"),
+    ("code", """from src.config import load_config
+from src import data
+cfg = load_config()
+
+var_eps, per_day = CE.within_day_aqi_variance(hourly)
+_, df = data.load_clean(cfg["data"]["drive_path"], from_disk=True, seed=cfg["seed"])
+var_labels = float(df["pm25"].var())
+
+res = CE.error_ceiling(var_eps, var_labels)
+print("Var(eps)  (within-day AQI variance): %.1f  (std ~ %.1f AQI)" % (var_eps, var_eps**0.5))
+print("Var(y)    (dataset label variance):  %.1f  (std ~ %.1f AQI)" % (var_labels, var_labels**0.5))
+print("--------")
+print("R2_max (best achievable R2): %.3f" % res["R2_max"])
+print("published baseline R2:       0.550")
+print("honest interval-width floor: ~%.1f AQI (a range narrower than this over-claims)" % res["interval_width_floor"])"""),
+
+    ("md", """## Save for the paper"""),
+    ("code", """import os, json
+os.makedirs(cfg["data"]["outputs_dir"], exist_ok=True)
+json.dump({**res, "n_station_days": int(len(per_day))},
+          open(os.path.join(cfg["data"]["outputs_dir"], "error_ceiling.json"), "w"), indent=2)
+print("saved error_ceiling.json")"""),
+
+    ("md", """## Reading the result
+
+- If **R²_max is well above 0.55**, there's real room to improve over the published baseline.
+- If it's **close to 0.55**, the published result may already be near the best possible given
+  daily-average labels — itself a strong, honest finding for the paper.
+- The **width floor** sets a lower bound on honest interval width: no interval should be
+  narrower than the label noise itself.
+
+Paste these numbers back and I'll write them into `docs/RESULTS.md`.
+
+**Next:** `08_abstention.ipynb` (C3 — refusing to answer on unusable inputs)."""),
+]
+
 if __name__ == "__main__":
     build("00_setup.ipynb", SETUP)
     build("01_data_audit.ipynb", AUDIT)
@@ -659,3 +753,4 @@ if __name__ == "__main__":
     build("04_model.ipynb", MODEL)
     build("05_train.ipynb", TRAIN)
     build("06_calibrate_evaluate.ipynb", EVAL)
+    build("07_error_ceiling.ipynb", CEILING)

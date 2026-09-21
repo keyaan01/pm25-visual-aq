@@ -41,6 +41,11 @@ verifies this on random inputs.
 The outputs live in **log(AQI)** space (we train on the log target, Phase 5). Exponentiating
 back to AQI is monotone, so the ordering is preserved.
 
+**Plus a point head (Phase 5b).** Alongside the three quantiles, the model has a 4th output — a
+plain linear **point head** trained with Huber loss — used for the accuracy numbers (MAE/RMSE/R²).
+`forward` returns a dict `{"quantiles", "point"}`. The quantiles give the calibrated interval; the
+point head gives the best single estimate. See `docs/05_training.md`.
+
 ## What's next
 
 Phase 5 (`05_train`) trains these heads with the **pinball loss** so each one learns its

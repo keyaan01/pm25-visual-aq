@@ -4,10 +4,13 @@
 > later session, **read this first**, then `docs/` for details and the approved plan at
 > `~/.claude/plans/this-is-the-output-steady-hearth.md`.
 
-**Last updated:** **Core pipeline complete (Phases 0–6)**, all locally smoke-tested on the
-fixture. Phase 1 confirmed on the full dataset in Colab. Awaiting the user's full Colab run
-(Phase 3 cache → Phase 5 train on GPU → Phase 6 eval). Next to build: C2 (Phase 7), C3
-(Phase 8), demo (Phase 10).
+**Last updated:** **Phase 5b (accuracy upgrades) built** after the first honest run gave R²=0.153.
+Core + C2 + 5b all locally smoke-tested. Awaiting the user's RE-TRAIN on Colab with the upgrades,
+then compare R²/MAE/coverage. Next to build: C3 (Phase 8), demo (Phase 10).
+
+**First honest result (station_grouped, pre-5b):** R²=0.153, MAE=55.5, Spearman=0.715,
+coverage=0.858, mean_width=159 — good ranking, but severe underprediction of extreme AQI (MAE 257
+in the 300+ band). Fix = Phase 5b.
 
 ## What this project is (30-second version)
 
@@ -37,7 +40,8 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,219 rows, 3,261 stations).
 | 4 | Model — EfficientNet-B0 + monotone quantiles (§3.6) | ✅ built + tested (5-ch stem, monotone by construction, pretrained load OK) |
 | 5 | Training — pinball loss, log target (§3.7, §3.12) | ✅ built + tested (CPU mini-run: losses/dataset/train chain) |
 | 6 | Conformal calibration + evaluation (§3.8, §3.11) | ✅ built + tested (conformal hits 0.90 on synthetic; full train→eval integration) — **core done** |
-| 7 | C2 error ceiling via OpenAQ (§3.10) | TODO (after core) |
+| 5b | Accuracy upgrades (point head + Huber + smearing; class-balanced sampling; +epochs) | ✅ built + tested; awaiting Colab re-train |
+| 7 | C2 error ceiling via OpenAQ (§3.10) | ✅ built + math tested (needs user's free OpenAQ key to run) |
 | 8 | C3 abstention via ExDark/DTD/Indoor (§3.9) | TODO (after core) |
 | 9 | Ablations (§3.11) | TODO |
 | 10 | Frontend demo (Gradio) | TODO (needs trained model) |

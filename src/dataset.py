@@ -18,8 +18,25 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision.transforms import v2
+
+# EPA AQI band edges used to balance the classes when sampling.
+AQI_BAND_EDGES = (0, 50, 100, 150, 200, 300, 10_000)
+
+
+def balanced_weights(targets_aqi, power=0.5, edges=AQI_BAND_EDGES):
+    """Per-sample sampling weights that oversample rare (extreme-AQI) bands.
+
+    weight ∝ (1 / band_frequency) ** power. `power=0` = no balancing (natural),
+    `power=1` = full inverse-frequency (aggressive), `power=0.5` = a gentle middle ground
+    (the default) that shows the model more high-AQI photos without over-flooding.
+    """
+    targets_aqi = np.asarray(targets_aqi, dtype=float)
+    band = np.digitize(targets_aqi, edges[1:-1])          # 0..len(edges)-2
+    counts = np.bincount(band, minlength=len(edges) - 1).astype(float)
+    freq = counts[band]
+    return (1.0 / np.maximum(freq, 1.0)) ** power
 
 from . import physics
 from .data import get_image
@@ -60,22 +77,37 @@ class PM25Dataset(Dataset):
 
 
 def make_dataloaders(ds, df_with_split, cache, cfg, num_workers=2):
-    """Build train / cal / test DataLoaders from a split-annotated metadata frame."""
+    """Build train / cal / test DataLoaders from a split-annotated metadata frame.
+
+    Class-balanced sampling (if enabled in the config) is applied to the **train loader only**,
+    so calibration and test keep the natural distribution — that's what makes the conformal
+    guarantee and the reported metrics honest.
+    """
     size = cfg["data"]["image_size"]
     target_col = cfg["data"]["target_col"]
     log_target = cfg["train"]["log_target"]
     batch = cfg["train"]["batch_size"]
+    balanced = cfg["train"].get("balanced_sampling", False)
+    power = cfg["train"].get("balance_power", 0.5)
 
-    def loader(split, augment, shuffle):
+    def loader(split, augment, shuffle, sampler=None):
         sub = df_with_split[df_with_split["split"] == split]
         dset = PM25Dataset(ds, sub, cache, size=size, target_col=target_col,
                            log_target=log_target, augment=augment)
-        return DataLoader(dset, batch_size=batch, shuffle=shuffle,
+        return DataLoader(dset, batch_size=batch, shuffle=shuffle, sampler=sampler,
                           num_workers=num_workers, pin_memory=torch.cuda.is_available(),
                           drop_last=False)
 
+    train_sampler = None
+    if balanced:
+        train_df = df_with_split[df_with_split["split"] == "train"]
+        w = balanced_weights(train_df[target_col].to_numpy(), power=power)
+        train_sampler = WeightedRandomSampler(torch.as_tensor(w, dtype=torch.double),
+                                              num_samples=len(w), replacement=True)
+
     return {
-        "train": loader("train", augment=True, shuffle=True),
+        # a sampler and shuffle are mutually exclusive: shuffle=False when sampling
+        "train": loader("train", augment=True, shuffle=(train_sampler is None), sampler=train_sampler),
         "cal": loader("cal", augment=False, shuffle=False),
         "test": loader("test", augment=False, shuffle=False),
     }

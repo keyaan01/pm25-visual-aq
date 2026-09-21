@@ -3,6 +3,11 @@
 Companion to the second half of `notebooks/06_calibrate_evaluate.ipynb`. Maps to **paper §3.11**.
 Everything is reported in **AQI points**.
 
+> **Phase 5b note.** Accuracy metrics (MAE/RMSE/R²) are computed from the **smeared point head**
+> (a Huber-trained estimate corrected for the log→AQI bias), not the median quantile — the median
+> is biased low on skewed data and understates R². Interval metrics (coverage/width) still come
+> from the conformal-calibrated quantiles. `Mx.report(point, intervals, y)` combines the two.
+
 ## What we measure (`src/metrics.py`)
 
 **Point accuracy of the median:**

@@ -54,7 +54,26 @@ smoke-tested on the 100-image fixture on CPU: batches are `(B,5,224,224)`, the t
 `log(AQI)`, the loss computes, a checkpoint saves, and predictions convert back to AQI while
 staying ascending (q05 ≤ q50 ≤ q95). The **full** run happens on the Colab GPU.
 
+## Accuracy upgrades (Phase 5b)
+
+The first honest run ranked pollution well (Spearman 0.72) but had low R² (0.15), because it
+badly underpredicted rare, extreme-AQI photos. Three config-driven upgrades target this — all on
+by default in `configs/default.yaml`:
+
+1. **A dedicated point head, trained with Huber loss.** The median quantile minimises absolute
+   error, which predicts *low* on a right-skewed target and hurts R². A separate Huber-trained
+   point output chases the conditional mean instead. Its log→AQI bias is removed at eval with
+   **Duan's smearing** (a single scalar from the calibration residuals). Accuracy (MAE/RMSE/R²) is
+   reported from this point head; the intervals still come from the quantile heads.
+2. **Class-balanced sampling** (`balanced_sampling`, `balance_power`): a `WeightedRandomSampler`
+   oversamples rare high-AQI bands **in the train loader only**, so calibration/test keep the
+   natural distribution and the conformal guarantee stays honest.
+3. **More epochs + patience** (60 / 10) to ensure convergence.
+
+Optional further levers: a bigger backbone (`model.backbone: efficientnet_b2` / `tf_efficientnetv2_s`)
+and test-time augmentation.
+
 ## What's next
 
-Phase 6 (`06_calibrate_evaluate`) turns these ordered-but-uncalibrated outputs into intervals
-with a guaranteed ~90% coverage, then reports the full metrics.
+Phase 6 (`06_calibrate_evaluate`) turns the ordered-but-uncalibrated quantiles into intervals with
+a guaranteed ~90% coverage, and reports accuracy from the smeared point head.

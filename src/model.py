@@ -44,7 +44,18 @@ class MonotoneQuantiles(nn.Module):
 
 
 class PM25QuantileNet(nn.Module):
-    """EfficientNet-B0 (in_chans=5) + monotone quantile head."""
+    """EfficientNet-B0 (in_chans=5) + monotone quantile head + optional point head.
+
+    `forward` returns a dict:
+      - "quantiles": (B, n) ascending quantile predictions (log-target space) — for intervals.
+      - "point":     (B,) a dedicated point estimate (log-target space) — for accuracy (R²/MAE),
+                     trained with Huber loss. Present only when `point_head=True`.
+
+    Why a separate point head? The median quantile minimises absolute error, which on a
+    right-skewed target predicts low and hurts R² (R² rewards matching the conditional mean).
+    A Huber-trained point head (plus a smearing correction at eval) gives a much better point
+    estimate, while the quantile heads still provide the calibrated interval.
+    """
 
     def __init__(
         self,
@@ -52,6 +63,7 @@ class PM25QuantileNet(nn.Module):
         in_chans: int = 5,
         pretrained: bool = True,
         quantiles=(0.05, 0.50, 0.95),
+        point_head: bool = True,
     ):
         super().__init__()
         self.quantiles = tuple(quantiles)
@@ -59,10 +71,14 @@ class PM25QuantileNet(nn.Module):
         self.backbone = timm.create_model(
             backbone, pretrained=pretrained, in_chans=in_chans, num_classes=0)
         self.head = MonotoneQuantiles(self.backbone.num_features, len(quantiles))
+        self.point_head = nn.Linear(self.backbone.num_features, 1) if point_head else None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return (B, n_quantiles) predictions in the (log) target space, ascending."""
-        return self.head(self.backbone(x))
+    def forward(self, x: torch.Tensor) -> dict:
+        feats = self.backbone(x)
+        out = {"quantiles": self.head(feats)}
+        if self.point_head is not None:
+            out["point"] = self.point_head(feats).squeeze(-1)   # (B,)
+        return out
 
 
 def build_model(cfg) -> PM25QuantileNet:
@@ -72,6 +88,7 @@ def build_model(cfg) -> PM25QuantileNet:
         in_chans=cfg["model"]["in_chans"],
         pretrained=cfg["model"]["pretrained"],
         quantiles=tuple(cfg["quantiles"]),
+        point_head=cfg["model"].get("point_head", True),
     )
 
 
