@@ -20,7 +20,7 @@ split:                                  # train / calibration / test (paper Sec 
   train: 0.65
   calibration: 0.15
   test: 0.20
-  strategy: station_grouped            # station_grouped | random | geographic | temporal
+  strategy: station_grouped            # station_grouped (primary) | random (leaky control) | shipped | geographic | temporal
 
 physics:                                # Dark Channel Prior + inverted saturation (paper Sec 3.5)
   dcp_patch: 15                        # local patch size for the dark channel
@@ -30,7 +30,7 @@ physics:                                # Dark Channel Prior + inverted saturati
 
 model:                                  # EfficientNet-B0 (paper Sec 3.6)
   backbone: efficientnet_b0            # Stage B search: efficientnet_b2 / tf_efficientnetv2_s / convnext_tiny
-  in_chans: 3                          # EXPERIMENT 1: RGB-only (3). Physics 5-channel is the default; will revert.
+  in_chans: 5                          # R, G, B, transmission, inverted-saturation
   pretrained: true
   point_head: true                     # dedicated Huber-trained point estimate for accuracy (Phase 5b)
   drop_path_rate: 0.2                  # stochastic depth — regularises the small (~7k) dataset (Stage A)
@@ -49,7 +49,8 @@ train:                                  # optimisation (paper Sec 3.12)
   point_loss_weight: 1.0               # weight of the Huber point loss vs the pinball loss (Phase 5b)
   huber_delta: 1.0                     # Huber transition, in standardised (z-score) units (Stage A)
   balanced_sampling: true              # oversample rare high-AQI photos in TRAIN only (Phase 5b)
-  balance_power: 0.5                   # 0 = natural, 1 = full inverse-frequency, 0.5 = gentle
+  balance_power: 1.0                   # 0 = natural, 1 = full inverse-frequency (strong; targets the rare high-AQI tail)
+  recalibrate: true                    # isotonic recalibration of the point estimate on cal (removes tail bias)
   early_stop_metric: cal_point_mae     # what early stopping minimises (accuracy-aligned, Stage A)
   # --- Stage B/C (added when we get there) ---
   ema: false                           # exponential moving average of weights (Stage B)

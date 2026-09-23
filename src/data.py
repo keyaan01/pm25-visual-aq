@@ -50,11 +50,16 @@ def load_pooled(source: str, from_disk: bool = True) -> Dataset:
     dd = load_from_disk(source) if from_disk else load_dataset(source)
     # `dd` may be a DatasetDict (has splits) or already a single Dataset.
     if hasattr(dd, "keys"):
-        parts = [dd[k] for k in dd.keys()]
+        parts, orig = [], []
+        for k in dd.keys():
+            parts.append(dd[k])
+            orig += [k] * len(dd[k])          # remember each row's SHIPPED split (train/test)
         ds = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
     else:
         ds = dd
+        orig = ["train"] * len(ds)
     ds = ds.add_column("_row", list(range(len(ds))))
+    ds = ds.add_column("orig_split", orig)     # used by the "shipped" split strategy
     return ds
 
 

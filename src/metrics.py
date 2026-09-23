@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.stats import spearmanr
+from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from .aqi import AQI_CATEGORIES, aqi_category_index
@@ -19,11 +19,19 @@ from .calibrate import coverage, mean_width
 
 
 def point_metrics(y_true: np.ndarray, y_median: np.ndarray) -> dict:
-    """MAE, RMSE, R2, Spearman rank correlation for the median prediction."""
+    """Point-accuracy metrics for a prediction.
+
+    Reports BOTH R² definitions, because papers use them interchangeably:
+      - R2   = coefficient of determination (sklearn r2_score) — the strict one; penalises
+               systematic bias/scale error. This is the field standard and what we headline.
+      - r2_pearson = squared Pearson correlation — measures linear association only, ignores
+               bias/scale, so it is always ≥ R2 and is often what looser papers call "R²".
+    """
     return {
         "MAE": float(mean_absolute_error(y_true, y_median)),
         "RMSE": float(np.sqrt(mean_squared_error(y_true, y_median))),
         "R2": float(r2_score(y_true, y_median)),
+        "r2_pearson": float(pearsonr(y_true, y_median).statistic ** 2),
         "Spearman": float(spearmanr(y_true, y_median).statistic),
     }
 

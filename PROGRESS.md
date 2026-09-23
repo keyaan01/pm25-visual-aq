@@ -25,9 +25,31 @@ y_std)` de-standardizes; no smearing anywhere now.
   channels may be hurting — added an **RGB-only ablation toggle** (`model.in_chans: 3`); (b) our
   test split may be harder. Also need C2 ceiling to know how much is irreducible.
 
-**Next experiments (evidence-driven):** run kaggle_pipeline with `model.in_chans: 3` (RGB-only) vs
-5; run C2 (no GPU, needs OpenAQ key); then Stage B (backbone) + C3 (abstention — accuracy on
-answered photos is the honest "high accuracy" story).
+**Experiment results so far (station_grouped honest, unless noted):**
+- physics 5-ch, Stage A: R²=0.164, MAE=53.5.
+- RGB-only (in_chans=3) + shipped 80/20 split (reproduce paper): **R²=0.132** — WORSE than physics,
+  nowhere near their 0.55. So physics isn't hurting and split choice isn't it.
+- Diagnosis (research-backed): (a) their 0.55 almost certainly used a RANDOM (station-leaky) split;
+  (b) our model underpredicts the rare high-AQI tail (deep imbalanced regression).
+
+**Accuracy fix implemented (this session):** `balance_power` 0.5→1.0 (strong tail sampling);
+**isotonic recalibration** of the point estimate on cal (`src/recalibrate.py` — removes systematic
+tail bias, no retrain); metrics now report BOTH `R2` (coeff. of determination, strict/field-standard)
+and `r2_pearson` (squared correlation, what loose papers quote). Config reset to honest primary
+(in_chans=5, station_grouped, recalibrate=true). Kaggle notebook reports raw vs recalibrated.
+
+**Next:** user runs kaggle_pipeline (honest, improved) → paste recalibrated R2/r2_pearson/MAE. Then
+optional `split.strategy: random` run to measure the leakage gap (explains the paper's 0.55). Then
+C2 ceiling; Stage B (backbone/EMA/TTA); C3 abstention.
+
+**PM25Vision paper (arXiv 2509.16519) baseline facts:** EfficientNet-B0 R²=0.550/MAE=36.6/RMSE=54.6
+on an **80/20 split** (= the shipped station-disjoint split). Paper gives NO target/loss/preproc/
+augmentation details — it's a plain RGB regressor, no physics, no calibration holdout. So our 0.16
+differs by (a) physics channels and (b) our own re-split. **EXPERIMENT 1 (set up now):** reproduce
+their baseline → `split.strategy: shipped` (test = their exact 2921 test rows; cal carved from their
+train) + `model.in_chans: 3` (RGB-only). Added `shipped` split strategy (uses `orig_split` from the
+DatasetDict) and RGB-only toggle. If this reproduces ~0.55, our pipeline is correct and 0.16 is just
+the honest harder split; if not, pipeline issue. Both toggles revert to 5-ch/station_grouped after.
 
 ## What this project is (30-second version)
 

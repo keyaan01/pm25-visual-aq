@@ -97,6 +97,19 @@ def make_splits(
     elif strategy == "geographic":
         cells = _geo_cell(out, lon_col, lat_col, geo_cell_deg)
         out["split"] = _group_split(cells, fractions, seed)
+    elif strategy == "shipped":
+        # Reproduce the PM25Vision paper's 80/20 split exactly: test = their shipped test rows.
+        # We still need a calibration set, so we carve it (station-grouped) out of their TRAIN rows.
+        if "orig_split" not in out.columns:
+            raise ValueError("shipped split needs 'orig_split' (load via load_pooled on a DatasetDict)")
+        lab = np.where(out["orig_split"].to_numpy() == "test", "test", "train").astype(object)
+        train_idx = np.where(lab == "train")[0]
+        cal_frac = fractions[1] / (fractions[0] + fractions[1])  # cal share OF the train portion
+        sub = out.iloc[train_idx]
+        grp = _group_split(sub[station_col], (1 - cal_frac, cal_frac, 0.0), seed)
+        for j, g in zip(train_idx, grp):
+            lab[j] = "cal" if g == "cal" else "train"
+        out["split"] = lab
     elif strategy == "temporal":
         order = out[time_col].astype("datetime64[ns]").argsort(kind="stable").to_numpy()
         n = len(out)

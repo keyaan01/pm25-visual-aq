@@ -790,7 +790,7 @@ Kaggle has no Google Drive, so we stream PM25Vision straight from the Hub (~1 GB
 Then we clean it (drop dead columns, de-duplicate, shuffle)."""),
     ("code", """from src.config import load_config
 from src import data, splits, physics, dataset as D, model as M, train as T
-from src import calibrate as C, metrics as Mx
+from src import calibrate as C, metrics as Mx, recalibrate as R
 import os, json, numpy as np, matplotlib.pyplot as plt
 cfg = load_config()
 device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
@@ -841,24 +841,39 @@ plt.xlabel("epoch"); plt.ylabel("MAE (AQI)"); plt.legend(); plt.title("Training 
 
     ("md", """## 6 — Calibrate + evaluate (once, on test)
 
-Accuracy from the de-standardised point head; the 90% interval from the conformal-calibrated
-quantiles. All numbers in AQI points."""),
+Accuracy from the point head; the 90% interval from the conformal-calibrated quantiles. We also
+apply **isotonic recalibration** (fit on the calibration set) to remove the systematic tail bias,
+and report **both** R² definitions (strict coefficient-of-determination `R2`, and squared-Pearson
+`r2_pearson` that looser papers quote). All in AQI points."""),
     ("code", """cal = T.collect_outputs(net, loaders["cal"], device)
 test = T.collect_outputs(net, loaders["test"], device)
 ymean, ystd = float(net.y_mean), float(net.y_std)
+cal_point = T.point_to_aqi(cal["point_out"], ymean, ystd)
 point = T.point_to_aqi(test["point_out"], ymean, ystd)
+
+# isotonic recalibration: fit prediction->truth on CAL, apply to TEST (removes tail bias)
+if cfg["train"].get("recalibrate", True):
+    iso = R.fit_isotonic(cal_point, cal["y_raw"])
+    point_final = R.apply_isotonic(iso, point)
+else:
+    point_final = point
+
 Q = C.conformal_Q(np.exp(cal["q_log"]), cal["y_raw"], cfg["calibration"]["coverage"])
 intervals = C.apply_conformal(np.exp(test["q_log"]), Q)
 y = test["y_raw"]
-rep = Mx.report(point, intervals, y, cfg["calibration"]["coverage"])
+rep_raw = Mx.report(point, intervals, y, cfg["calibration"]["coverage"])
+rep = Mx.report(point_final, intervals, y, cfg["calibration"]["coverage"])
 
-json.dump({**rep, "Q": Q, "y_mean": ymean, "y_std": ystd},
+keys = ("MAE","RMSE","R2","r2_pearson","Spearman","coverage","mean_width")
+print("split:", cfg["split"]["strategy"], "| conformal Q = %.1f AQI" % Q)
+print("raw point   :", {k: round(rep_raw[k],3) for k in keys})
+print("recalibrated:", {k: round(rep[k],3) for k in keys})
+json.dump({"recalibrated": rep, "raw": rep_raw, "Q": Q, "split": cfg["split"]["strategy"]},
           open(os.path.join(out_dir, "results.json"), "w"), indent=2)
-print("conformal Q = %.1f AQI | coverage %.3f (target %.2f)" % (Q, rep["coverage"], cfg["calibration"]["coverage"]))
-{k: round(v,3) for k,v in rep.items()}"""),
+{k: round(rep[k],3) for k in keys}"""),
 
-    ("md", "## 7 — Where is the error?\nMAE of the point estimate by true-AQI band + calibrated interval widths."),
-    ("code", """ebm = Mx.error_by_magnitude(y, point)
+    ("md", "## 7 — Where is the error?\nMAE of the (recalibrated) point estimate by true-AQI band + calibrated interval widths."),
+    ("code", """ebm = Mx.error_by_magnitude(y, point_final)
 display(ebm)
 plt.figure(figsize=(7,3)); plt.bar(ebm["band"], ebm["MAE"]); plt.xlabel("true AQI band"); plt.ylabel("MAE (AQI)")
 plt.title("Error by pollution level"); plt.show()
@@ -867,19 +882,21 @@ idx = np.argsort(y)[::max(1, len(y)//40)][:40]
 xs = np.arange(len(idx))
 plt.figure(figsize=(9,4))
 plt.vlines(xs, intervals[idx,0], intervals[idx,2], color="#4C78A8", lw=3, alpha=0.5, label="90% interval")
-plt.plot(xs, point[idx], "o", ms=4, color="#4C78A8", label="point estimate")
+plt.plot(xs, point_final[idx], "o", ms=4, color="#4C78A8", label="point estimate")
 plt.plot(xs, y[idx], "x", ms=6, color="#E45756", label="truth")
 plt.legend(); plt.xlabel("test photos (sorted by true AQI)"); plt.ylabel("AQI"); plt.title("Predictions vs truth"); plt.show()"""),
 
     ("md", """## Done — send me these numbers
 
-Paste the metrics dict from step 6 (MAE / RMSE / R² / coverage / mean_width). We compare against
-the pre-upgrade run (R²=0.153, MAE=55.5) and the C2 ceiling.
+Paste the **recalibrated** metrics from step 6 (R2, r2_pearson, MAE, RMSE, coverage).
 
-**To keep your model:** click **Save Version** (top right) → the checkpoint in
-`/kaggle/working/pm25_outputs/…/best_model.pth` persists as the notebook's Output, downloadable and
-reusable by the demo. If accuracy needs more, next is **Stage B** (bigger backbone via
-`configs/default.yaml` → `model.backbone`, plus EMA/TTA) and **Stage C** (seed ensemble)."""),
+**Leakage check (optional, 1 extra run):** edit `configs/default.yaml` → `split.strategy: random`,
+push, Run All again. If R² jumps toward ~0.5, that's the leakage the paper's 0.55 almost certainly
+rode on — a headline finding, measured on our own pipeline.
+
+**To keep your model:** **Save Version** (top right) → the checkpoint under
+`/kaggle/working/pm25_outputs/…` persists as the notebook Output. Next levers if needed: bigger
+backbone (`model.backbone`), EMA/TTA, seed ensemble."""),
 ]
 
 if __name__ == "__main__":
