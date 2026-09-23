@@ -64,20 +64,34 @@ class PM25QuantileNet(nn.Module):
         pretrained: bool = True,
         quantiles=(0.05, 0.50, 0.95),
         point_head: bool = True,
+        drop_path_rate: float = 0.0,
     ):
         super().__init__()
         self.quantiles = tuple(quantiles)
-        # num_classes=0 -> the backbone returns pooled features, not logits
+        # num_classes=0 -> the backbone returns pooled features, not logits.
+        # drop_path_rate = stochastic depth: a regulariser that helps on our small (~7k) dataset.
         self.backbone = timm.create_model(
-            backbone, pretrained=pretrained, in_chans=in_chans, num_classes=0)
+            backbone, pretrained=pretrained, in_chans=in_chans, num_classes=0,
+            drop_path_rate=drop_path_rate)
         self.head = MonotoneQuantiles(self.backbone.num_features, len(quantiles))
         self.point_head = nn.Linear(self.backbone.num_features, 1) if point_head else None
+        # The point head predicts a STANDARDISED target (z-score). These buffers hold the
+        # train-set AQI mean/std so we can de-standardise back to AQI at inference. Standardising
+        # means a freshly-initialised head starts by predicting the mean (a good starting point)
+        # and there is no unstable retransformation — much more reliable than raw or log+smearing.
+        self.register_buffer("y_mean", torch.tensor(0.0))
+        self.register_buffer("y_std", torch.tensor(1.0))
+
+    def set_target_stats(self, mean: float, std: float):
+        """Store the train-set target mean/std used to (de)standardise the point head."""
+        self.y_mean.fill_(float(mean))
+        self.y_std.fill_(max(float(std), 1e-6))
 
     def forward(self, x: torch.Tensor) -> dict:
         feats = self.backbone(x)
         out = {"quantiles": self.head(feats)}
         if self.point_head is not None:
-            out["point"] = self.point_head(feats).squeeze(-1)   # (B,)
+            out["point"] = self.point_head(feats).squeeze(-1)   # (B,) standardised
         return out
 
 
@@ -89,6 +103,7 @@ def build_model(cfg) -> PM25QuantileNet:
         pretrained=cfg["model"]["pretrained"],
         quantiles=tuple(cfg["quantiles"]),
         point_head=cfg["model"].get("point_head", True),
+        drop_path_rate=cfg["model"].get("drop_path_rate", 0.0),
     )
 
 

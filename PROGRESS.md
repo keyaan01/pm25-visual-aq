@@ -4,9 +4,16 @@
 > later session, **read this first**, then `docs/` for details and the approved plan at
 > `~/.claude/plans/this-is-the-output-steady-hearth.md`.
 
-**Last updated:** **Phase 5b (accuracy upgrades) built** after the first honest run gave R²=0.153.
-Core + C2 + 5b all locally smoke-tested. Awaiting the user's RE-TRAIN on Colab with the upgrades,
-then compare R²/MAE/coverage. Next to build: C3 (Phase 8), demo (Phase 10).
+**Last updated:** **Stage A (max-accuracy) + Kaggle pivot built.** Colab free GPU hit its limit →
+switched to Kaggle. Standardized point head (Huber on z-scored AQI — robust, no smearing blow-up),
+early-stop on cal point-MAE, class-balanced sampling, drop_path. All locally smoke-tested incl. a
+headless end-to-end run of `kaggle_pipeline.ipynb`. **Awaiting user's Kaggle run** (Stage A) to
+compare R²/MAE vs the 0.153 baseline. Then Stage B (backbone/EMA/TTA), Stage C (ensemble), C3, demo.
+
+**Key design note:** point head predicts a STANDARDIZED target (mean/std stored as model buffers,
+travel in the checkpoint). Earlier raw-direct underpredicted (slow to reach scale) and log+smearing
+was numerically UNSTABLE (smear exploded) — standardization fixed both. `point_to_aqi(out, y_mean,
+y_std)` de-standardizes; no smearing anywhere now.
 
 **First honest result (station_grouped, pre-5b):** R²=0.153, MAE=55.5, Spearman=0.715,
 coverage=0.858, mean_width=159 — good ranking, but severe underprediction of extreme AQI (MAE 257
@@ -40,7 +47,8 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,219 rows, 3,261 stations).
 | 4 | Model — EfficientNet-B0 + monotone quantiles (§3.6) | ✅ built + tested (5-ch stem, monotone by construction, pretrained load OK) |
 | 5 | Training — pinball loss, log target (§3.7, §3.12) | ✅ built + tested (CPU mini-run: losses/dataset/train chain) |
 | 6 | Conformal calibration + evaluation (§3.8, §3.11) | ✅ built + tested (conformal hits 0.90 on synthetic; full train→eval integration) — **core done** |
-| 5b | Accuracy upgrades (point head + Huber + smearing; class-balanced sampling; +epochs) | ✅ built + tested; awaiting Colab re-train |
+| 5b | Accuracy upgrades (point head; class-balanced sampling; +epochs) | ✅ built + tested |
+| 5c | Stage A max-accuracy (standardized point head, cal-MAE early stop, drop_path) + Kaggle notebook | ✅ built + tested; awaiting Kaggle run |
 | 7 | C2 error ceiling via OpenAQ (§3.10) | ✅ built + math tested (needs user's free OpenAQ key to run) |
 | 8 | C3 abstention via ExDark/DTD/Indoor (§3.9) | TODO (after core) |
 | 9 | Ablations (§3.11) | TODO |

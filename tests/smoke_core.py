@@ -51,29 +51,29 @@ def main():
     assert os.path.exists(os.path.join(out, "best_model.pth"))
     print("[train]   checkpoint saved")
 
-    # reload + predict (raw log-space outputs: quantiles + point head)
+    # reload + predict (quantiles in log space + standardised point head)
     net2 = M.PM25QuantileNet(in_chans=5, pretrained=False, quantiles=tuple(cfg["quantiles"]))
     T.load_checkpoint(os.path.join(out, "best_model.pth"), net2, map_location="cpu")
     cal = T.collect_outputs(net2, loaders["cal"], "cpu")
     test = T.collect_outputs(net2, loaders["test"], "cpu")
     q_test = np.exp(test["q_log"])
     assert np.all(q_test[:, 1:] >= q_test[:, :-1] - 1e-4), "quantiles must stay ascending"
-    print("[predict] quantiles ascending; point head present")
+    assert float(net2.y_std) > 1.0, "target stats should have loaded from the checkpoint buffers"
+    print("[predict] quantiles ascending; point head standardised (mean=%.0f std=%.0f)"
+          % (float(net2.y_mean), float(net2.y_std)))
 
-    # Phase 5b — smeared point estimate for accuracy
-    smear = C.smearing_factor(cal["point_log"], cal["y_log"])
-    point = C.apply_point(test["point_log"], smear)
+    # Stage A — de-standardise the point head to AQI
+    point = T.point_to_aqi(test["point_out"], float(net2.y_mean), float(net2.y_std))
 
     # Phase 6 — conformal calibration hits the target coverage (model-independent guarantee)
-    Q = C.conformal_Q(np.exp(cal["q_log"]), np.exp(cal["y_log"]), cfg["calibration"]["coverage"])
+    Q = C.conformal_Q(np.exp(cal["q_log"]), cal["y_raw"], cfg["calibration"]["coverage"])
     intervals = C.apply_conformal(q_test, Q)
-    y_test = np.exp(test["y_log"])
+    y_test = test["y_raw"]
     cov = C.coverage(intervals, y_test)
     assert cov >= cfg["calibration"]["coverage"] - 0.15  # tiny cal set → allow slack
     rep = Mx.report(point, intervals, y_test)
     assert set(rep) >= {"MAE", "RMSE", "R2", "coverage", "mean_width", "category_accuracy"}
-    print(f"[calib]   Q={Q:.1f}  smear={smear:.2f}  coverage={cov:.2f} "
-          f"(target {cfg['calibration']['coverage']})")
+    print(f"[calib]   Q={Q:.1f}  coverage={cov:.2f} (target {cfg['calibration']['coverage']})")
 
     print("\nALL CORE (PHASES 2–6) SMOKE CHECKS PASSED")
 

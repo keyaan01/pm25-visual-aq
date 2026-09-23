@@ -32,16 +32,20 @@ def pinball_loss(preds: torch.Tensor, target: torch.Tensor, quantiles) -> torch.
     return loss.mean()
 
 
-def combined_loss(out: dict, target: torch.Tensor, quantiles,
-                  point_weight: float = 1.0, huber_delta: float = 1.0) -> torch.Tensor:
-    """Total training loss = pinball(quantile heads) + point_weight * Huber(point head).
+def combined_loss(out: dict, y_raw: torch.Tensor, quantiles,
+                  point_weight: float = 1.0, huber_delta: float = 1.0,
+                  y_mean: float = 0.0, y_std: float = 1.0) -> torch.Tensor:
+    """Total training loss = pinball(quantile heads, log space) + point_weight * Huber(point head).
 
-    `out` is the model's dict output ({"quantiles", optional "point"}). The point head is
-    trained with the **Huber loss** — like squared error near the target but linear for large
-    errors, so it chases the mean for accuracy (good R²) without letting the rare extreme days
-    blow up the gradients. Both heads work in the log-AQI space; `target` is log(AQI).
+    `out` is the model's dict output ({"quantiles", optional "point"}) and `y_raw` is the raw AQI
+    target. The **quantile heads always train in log space** (stable intervals on a skewed target).
+    The **point head** trains on the **standardised** target `(y_raw - y_mean) / y_std` with the
+    Huber loss (squared-error near the target, linear for big errors — chases the mean for accuracy
+    while staying robust to the rare extreme days). Standardising keeps everything O(1) and stable.
     """
-    loss = pinball_loss(out["quantiles"], target, quantiles)
+    y_log = torch.log(y_raw.clamp_min(1e-6))
+    loss = pinball_loss(out["quantiles"], y_log, quantiles)
     if "point" in out and point_weight > 0:
-        loss = loss + point_weight * F.huber_loss(out["point"], target, delta=huber_delta)
+        pt_target = (y_raw - y_mean) / y_std
+        loss = loss + point_weight * F.huber_loss(out["point"], pt_target, delta=huber_delta)
     return loss

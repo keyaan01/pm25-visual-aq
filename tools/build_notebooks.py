@@ -597,22 +597,22 @@ def evaluate_strategy(strategy):
     T.load_checkpoint(os.path.join(out_root, strategy, "best_model.pth"), net, map_location=device)
     cal = T.collect_outputs(net, loaders["cal"], device)
     test = T.collect_outputs(net, loaders["test"], device)
-    # accuracy: smeared point head
-    smear = C.smearing_factor(cal["point_log"], cal["y_log"])
-    point = C.apply_point(test["point_log"], smear)
+    # accuracy: de-standardised point head
+    ymean, ystd = float(net.y_mean), float(net.y_std)
+    point = T.point_to_aqi(test["point_out"], ymean, ystd)
     # intervals: conformal-calibrated quantiles
-    Q = C.conformal_Q(np.exp(cal["q_log"]), np.exp(cal["y_log"]), cfg["calibration"]["coverage"])
+    Q = C.conformal_Q(np.exp(cal["q_log"]), cal["y_raw"], cfg["calibration"]["coverage"])
     intervals = C.apply_conformal(np.exp(test["q_log"]), Q)
-    y = np.exp(test["y_log"])
-    json.dump({"Q": Q, "smear": smear},
+    y = test["y_raw"]
+    json.dump({"Q": Q, "y_mean": ymean, "y_std": ystd},
               open(os.path.join(out_root, strategy, "conformal_Q.json"), "w"))
-    return {"strategy": strategy, "Q": Q, "smear": smear, "point": point,
+    return {"strategy": strategy, "Q": Q, "point": point,
             "intervals": intervals, "y": y,
             "raw_coverage": C.coverage(np.exp(test["q_log"]), y),
             "report": Mx.report(point, intervals, y, cfg["calibration"]["coverage"])}
 
 primary = evaluate_strategy(cfg["split"]["strategy"])
-print("strategy:", primary["strategy"], "| Q = %.1f AQI | smearing = %.3f" % (primary["Q"], primary["smear"]))
+print("strategy:", primary["strategy"], "| Q = %.1f AQI" % primary["Q"])
 print("coverage: raw %.3f -> calibrated %.3f (target %.2f)"
       % (primary["raw_coverage"], primary["report"]["coverage"], cfg["calibration"]["coverage"]))
 {k: round(v,3) for k,v in primary["report"].items()}"""),
@@ -745,6 +745,143 @@ Paste these numbers back and I'll write them into `docs/RESULTS.md`.
 **Next:** `08_abstention.ipynb` (C3 — refusing to answer on unusable inputs)."""),
 ]
 
+# ===========================================================================
+# kaggle_pipeline.ipynb  (consolidated single-session runner for Kaggle GPU)
+# ===========================================================================
+KAGGLE_BOOTSTRAP = '''# === Kaggle bootstrap — RUN ME FIRST ===
+# In the right sidebar: Accelerator = GPU T4, Internet = ON (needs a phone-verified account).
+REPO_URL = "https://github.com/YOUR_USERNAME/pm25-visual-aq.git"   # <-- EDIT THIS
+
+import os, sys, subprocess
+REPO = "/kaggle/working/pm25-visual-aq"
+if not os.path.isdir(REPO):
+    subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO], check=True)
+os.chdir(REPO)
+sys.path.insert(0, REPO)
+subprocess.run(["pip", "install", "-q", "-r", "requirements.txt"], check=False)
+
+import torch
+print("repo:", os.getcwd())
+print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "NONE — set Accelerator=GPU")'''
+
+KAGGLE = [
+    ("md", """# PM2.5 — full pipeline on Kaggle GPU (Stage A: maximize accuracy)
+
+Colab's free GPU is rate-limited, so we run the whole thing here in **one session**: load data →
+build physics features → train (with the accuracy upgrades) → calibrate → evaluate. It reuses the
+same tested `src/` modules; the per-phase Colab notebooks and `docs/` have the full explanations.
+
+**What "Stage A" does for accuracy (the honest, leakage-safe station-grouped split):**
+- reports accuracy from a **standardised point head** (trained to hit the *mean*, not the biased
+  log-median) — the main fix for the low R²;
+- **class-balanced sampling** so the model sees the rare high-pollution photos;
+- **stochastic-depth** regularisation + full convergence;
+- everything selected on the **calibration** split; **test is evaluated once**.
+
+**Before running:** right sidebar → Accelerator = **GPU T4**, Internet = **On**. Then set
+`REPO_URL` below and **Run All**."""),
+
+    ("md", "## 1 — Bootstrap (clone code, install, check GPU)"),
+    ("code", KAGGLE_BOOTSTRAP),
+
+    ("md", """## 2 — Load the dataset from Hugging Face
+
+Kaggle has no Google Drive, so we stream PM25Vision straight from the Hub (~1 GB, a few minutes).
+Then we clean it (drop dead columns, de-duplicate, shuffle)."""),
+    ("code", """from src.config import load_config
+from src import data, splits, physics, dataset as D, model as M, train as T
+from src import calibrate as C, metrics as Mx
+import os, json, numpy as np, matplotlib.pyplot as plt
+cfg = load_config()
+device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+
+WORK = "/kaggle/working"
+cache_path = os.path.join(WORK, "pm25_cache", "physics_maps_%d.npy" % cfg["data"]["image_size"])
+out_dir = os.path.join(WORK, "pm25_outputs", cfg["split"]["strategy"])
+os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+
+ds, df = data.load_clean(cfg["data"]["hf_repo"], from_disk=False, seed=cfg["seed"])
+print("clean rows:", len(df), "| dupes removed:", df.attrs.get("n_duplicates_removed"))"""),
+
+    ("md", """## 3 — Build the physics-map cache (~15 min, once per session)
+
+Dark Channel Prior transmission + inverted-saturation for every image, cached to
+`/kaggle/working`. Re-running detects the existing cache and skips."""),
+    ("code", """if os.path.exists(cache_path):
+    print("cache exists:", cache_path)
+else:
+    physics.build_map_cache(len(ds), lambda i: data.get_image(ds, i), cache_path,
+        size=cfg["data"]["image_size"], patch=cfg["physics"]["dcp_patch"],
+        omega=cfg["physics"]["dcp_omega"], top_frac=cfg["physics"]["atmos_top_frac"],
+        t_min=cfg["physics"]["t_min"])
+cache = physics.load_map_cache(cache_path)
+print("cache:", cache.shape)"""),
+
+    ("md", """## 4 — Leakage-safe split + train (~30 min on T4)
+
+Station-grouped split (no station spans train/test), balanced loaders, EfficientNet-B0 + the
+point head. Best model (lowest **calibration point-MAE**) is saved to `/kaggle/working`."""),
+    ("code", """T.set_seed(cfg["seed"])
+sp = splits.make_splits(df, strategy=cfg["split"]["strategy"], seed=cfg["seed"],
+        station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
+        lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
+print("split:", sp["split"].value_counts().to_dict())
+
+loaders = D.make_dataloaders(ds, sp, cache, cfg, num_workers=2)
+net = M.build_model(cfg).to(device)
+print("backbone:", cfg["model"]["backbone"], "| params %.2fM" % (M.count_parameters(net)/1e6))
+history = T.train_model(net, loaders, cfg, device=device, out_dir=out_dir)
+print("best epoch:", history["best_epoch"]+1, "| best cal MAE: %.2f AQI" % history["best_cal_point_mae"])"""),
+
+    ("md", "## 5 — Learning curve\nCalibration MAE (AQI) should fall then flatten; early stopping keeps the best."),
+    ("code", """plt.figure(figsize=(7,4))
+plt.plot(history["cal_point_mae"], label="calibration MAE")
+plt.axvline(history["best_epoch"], ls="--", c="grey", label="best")
+plt.xlabel("epoch"); plt.ylabel("MAE (AQI)"); plt.legend(); plt.title("Training curve"); plt.show()"""),
+
+    ("md", """## 6 — Calibrate + evaluate (once, on test)
+
+Accuracy from the de-standardised point head; the 90% interval from the conformal-calibrated
+quantiles. All numbers in AQI points."""),
+    ("code", """cal = T.collect_outputs(net, loaders["cal"], device)
+test = T.collect_outputs(net, loaders["test"], device)
+ymean, ystd = float(net.y_mean), float(net.y_std)
+point = T.point_to_aqi(test["point_out"], ymean, ystd)
+Q = C.conformal_Q(np.exp(cal["q_log"]), cal["y_raw"], cfg["calibration"]["coverage"])
+intervals = C.apply_conformal(np.exp(test["q_log"]), Q)
+y = test["y_raw"]
+rep = Mx.report(point, intervals, y, cfg["calibration"]["coverage"])
+
+json.dump({**rep, "Q": Q, "y_mean": ymean, "y_std": ystd},
+          open(os.path.join(out_dir, "results.json"), "w"), indent=2)
+print("conformal Q = %.1f AQI | coverage %.3f (target %.2f)" % (Q, rep["coverage"], cfg["calibration"]["coverage"]))
+{k: round(v,3) for k,v in rep.items()}"""),
+
+    ("md", "## 7 — Where is the error?\nMAE of the point estimate by true-AQI band + calibrated interval widths."),
+    ("code", """ebm = Mx.error_by_magnitude(y, point)
+display(ebm)
+plt.figure(figsize=(7,3)); plt.bar(ebm["band"], ebm["MAE"]); plt.xlabel("true AQI band"); plt.ylabel("MAE (AQI)")
+plt.title("Error by pollution level"); plt.show()
+
+idx = np.argsort(y)[::max(1, len(y)//40)][:40]
+xs = np.arange(len(idx))
+plt.figure(figsize=(9,4))
+plt.vlines(xs, intervals[idx,0], intervals[idx,2], color="#4C78A8", lw=3, alpha=0.5, label="90% interval")
+plt.plot(xs, point[idx], "o", ms=4, color="#4C78A8", label="point estimate")
+plt.plot(xs, y[idx], "x", ms=6, color="#E45756", label="truth")
+plt.legend(); plt.xlabel("test photos (sorted by true AQI)"); plt.ylabel("AQI"); plt.title("Predictions vs truth"); plt.show()"""),
+
+    ("md", """## Done — send me these numbers
+
+Paste the metrics dict from step 6 (MAE / RMSE / R² / coverage / mean_width). We compare against
+the pre-upgrade run (R²=0.153, MAE=55.5) and the C2 ceiling.
+
+**To keep your model:** click **Save Version** (top right) → the checkpoint in
+`/kaggle/working/pm25_outputs/…/best_model.pth` persists as the notebook's Output, downloadable and
+reusable by the demo. If accuracy needs more, next is **Stage B** (bigger backbone via
+`configs/default.yaml` → `model.backbone`, plus EMA/TTA) and **Stage C** (seed ensemble)."""),
+]
+
 if __name__ == "__main__":
     build("00_setup.ipynb", SETUP)
     build("01_data_audit.ipynb", AUDIT)
@@ -754,3 +891,4 @@ if __name__ == "__main__":
     build("05_train.ipynb", TRAIN)
     build("06_calibrate_evaluate.ipynb", EVAL)
     build("07_error_ceiling.ipynb", CEILING)
+    build("kaggle_pipeline.ipynb", KAGGLE)

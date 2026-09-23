@@ -70,10 +70,10 @@ class PM25Dataset(Dataset):
         x = torch.from_numpy(x)
         if self.aug is not None:
             x = self.aug(x)
-        y = float(self.targets[i])
-        if self.log_target:
-            y = np.log(max(y, 1e-6))          # AQI >= 1, so log is well-defined
-        return x, torch.tensor(y, dtype=torch.float32)
+        # Return the RAW AQI target. The loss applies log for the quantile heads and the
+        # configured transform for the point head; eval inverts them. Keeping raw here lets the
+        # point head train in raw space (best for R²) or log space, chosen by config.
+        return x, torch.tensor(float(self.targets[i]), dtype=torch.float32)
 
 
 def make_dataloaders(ds, df_with_split, cache, cfg, num_workers=2):
