@@ -44,11 +44,12 @@ from .data import get_image
 
 class PM25Dataset(Dataset):
     def __init__(self, ds, df_split, cache, size=224, target_col="pm25",
-                 log_target=True, augment=False):
+                 log_target=True, augment=False, in_chans=5):
         self.ds = ds
         self.cache = cache
         self.size = size
         self.log_target = log_target
+        self.in_chans = in_chans          # 5 = RGB+physics; 3 = RGB-only (ablation)
         self.rows = df_split["_row"].to_numpy()
         self.targets = df_split[target_col].to_numpy(dtype=np.float32)
         # geometric-only augmentation (train split); acts on all 5 channels together
@@ -67,6 +68,8 @@ class PM25Dataset(Dataset):
             x = physics.five_channel_cached(get_image(self.ds, row), self.cache, row, self.size)
         else:  # fallback: compute on the fly (slower)
             x = physics.five_channel(get_image(self.ds, row), size=self.size)
+        if self.in_chans == 3:            # RGB-only ablation: drop the two physics channels
+            x = x[:3]
         x = torch.from_numpy(x)
         if self.aug is not None:
             x = self.aug(x)
@@ -90,10 +93,12 @@ def make_dataloaders(ds, df_with_split, cache, cfg, num_workers=2):
     balanced = cfg["train"].get("balanced_sampling", False)
     power = cfg["train"].get("balance_power", 0.5)
 
+    in_chans = cfg["model"].get("in_chans", 5)
+
     def loader(split, augment, shuffle, sampler=None):
         sub = df_with_split[df_with_split["split"] == split]
         dset = PM25Dataset(ds, sub, cache, size=size, target_col=target_col,
-                           log_target=log_target, augment=augment)
+                           log_target=log_target, augment=augment, in_chans=in_chans)
         return DataLoader(dset, batch_size=batch, shuffle=shuffle, sampler=sampler,
                           num_workers=num_workers, pin_memory=torch.cuda.is_available(),
                           drop_last=False)

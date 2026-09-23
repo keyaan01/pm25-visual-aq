@@ -15,9 +15,19 @@ travel in the checkpoint). Earlier raw-direct underpredicted (slow to reach scal
 was numerically UNSTABLE (smear exploded) — standardization fixed both. `point_to_aqi(out, y_mean,
 y_std)` de-standardizes; no smearing anywhere now.
 
-**First honest result (station_grouped, pre-5b):** R²=0.153, MAE=55.5, Spearman=0.715,
-coverage=0.858, mean_width=159 — good ranking, but severe underprediction of extreme AQI (MAE 257
-in the 300+ band). Fix = Phase 5b.
+**Result history (station_grouped, honest):**
+- pre-5b: R²=0.153, MAE=55.5, Spearman=0.715.
+- Stage A (Kaggle, standardized point head + balanced + drop_path): R²=0.164, MAE=53.5,
+  Spearman=0.665, coverage=0.881, mean_width=164. **Barely moved** — because the bottleneck is NOT
+  the objective, it's the **300+ AQI band (MAE 287, n=173)** which likely hits a visual ceiling
+  (a photo can't tell AQI 300 from 500). Model is actually decent for AQI<200 (MAE 22–47).
+- Open question: gap to published 0.55 (RGB-only baseline). Hypotheses to TEST: (a) our physics
+  channels may be hurting — added an **RGB-only ablation toggle** (`model.in_chans: 3`); (b) our
+  test split may be harder. Also need C2 ceiling to know how much is irreducible.
+
+**Next experiments (evidence-driven):** run kaggle_pipeline with `model.in_chans: 3` (RGB-only) vs
+5; run C2 (no GPU, needs OpenAQ key); then Stage B (backbone) + C3 (abstention — accuracy on
+answered photos is the honest "high accuracy" story).
 
 ## What this project is (30-second version)
 
