@@ -38,9 +38,25 @@ tail bias, no retrain); metrics now report BOTH `R2` (coeff. of determination, s
 and `r2_pearson` (squared correlation, what loose papers quote). Config reset to honest primary
 (in_chans=5, station_grouped, recalibrate=true). Kaggle notebook reports raw vs recalibrated.
 
-**Next:** user runs kaggle_pipeline (honest, improved) → paste recalibrated R2/r2_pearson/MAE. Then
-optional `split.strategy: random` run to measure the leakage gap (explains the paper's 0.55). Then
-C2 ceiling; Stage B (backbone/EMA/TTA); C3 abstention.
+**ROOT CAUSE of stuck R² (found via 3-agent audit + confirmed synthetically):** the point head used
+**Huber loss with delta=1.0 in STANDARDIZED units** → 1σ≈57 AQI, so all high-AQI targets fell in
+Huber's capped-gradient (L1) region → the head learned the **median, not the mean** → underpredicted
+the skewed tail → low R² despite good Spearman. Synthetic proof: fitting a skewed target, MSE→0.500
+(true mean), Huber(δ=1)→0.11 (≈median). This is why balancing + isotonic hadn't helped.
+
+**Fixes implemented (this session):** (1) point head now trained with **MSE** (mean-seeking, good R²)
+— `train.point_loss: mse`, `losses.combined_loss` MSE branch; (2) Kaggle notebook now **reloads the
+best checkpoint** before eval (was using last epoch); (3) **physics channels standardized**
+(`physics.PHYS_MEAN/STD` in `assemble_five_channel`) so they're not down-weighted. All locally
+smoke-tested incl. headless kaggle run.
+
+**Literature reality check (agent 3, with citations):** honest R² ~0.16 is IN the defensible range
+(0.10–0.35) for single-image daily-avg station-disjoint AQI; closest analogue Mondal 2024 (easier
+setup) = R² 0.39/r 0.63; realistic ceiling ~0.3–0.45; the paper's 0.55 is almost certainly
+leakage-inflated. So low honest R² is expected/publishable, not a failure.
+
+**Next:** user runs kaggle_pipeline (fixed) → expect R² up toward ~0.3. Then `split.strategy: random`
+run → expect ~0.5 (measures leakage gap; explains 0.55). Then C2 ceiling; Stage B; C3 abstention.
 
 **PM25Vision paper (arXiv 2509.16519) baseline facts:** EfficientNet-B0 R²=0.550/MAE=36.6/RMSE=54.6
 on an **80/20 split** (= the shipped station-disjoint split). Paper gives NO target/loss/preproc/

@@ -34,18 +34,28 @@ def pinball_loss(preds: torch.Tensor, target: torch.Tensor, quantiles) -> torch.
 
 def combined_loss(out: dict, y_raw: torch.Tensor, quantiles,
                   point_weight: float = 1.0, huber_delta: float = 1.0,
-                  y_mean: float = 0.0, y_std: float = 1.0) -> torch.Tensor:
-    """Total training loss = pinball(quantile heads, log space) + point_weight * Huber(point head).
+                  y_mean: float = 0.0, y_std: float = 1.0,
+                  point_loss: str = "mse") -> torch.Tensor:
+    """Total training loss = pinball(quantile heads, log space) + point_weight * point-loss.
 
     `out` is the model's dict output ({"quantiles", optional "point"}) and `y_raw` is the raw AQI
     target. The **quantile heads always train in log space** (stable intervals on a skewed target).
-    The **point head** trains on the **standardised** target `(y_raw - y_mean) / y_std` with the
-    Huber loss (squared-error near the target, linear for big errors — chases the mean for accuracy
-    while staying robust to the rare extreme days). Standardising keeps everything O(1) and stable.
+    The **point head** trains on the **standardised** target `(y_raw - y_mean) / y_std`:
+
+      - `point_loss="mse"` (default): squared error → estimates the conditional **MEAN**, which is
+        what R² rewards. This is the correct objective for accuracy on a right-skewed target.
+      - `point_loss="huber"`: robust, but with a small delta it estimates the **median**, which sits
+        below the mean on skewed data and *depresses R²* — so it is not the default. (An earlier
+        version used Huber with delta=1 in std units, which capped the gradient beyond ~1σ and made
+        the head a median estimator — the root cause of the stuck-R² bug.)
     """
     y_log = torch.log(y_raw.clamp_min(1e-6))
     loss = pinball_loss(out["quantiles"], y_log, quantiles)
     if "point" in out and point_weight > 0:
         pt_target = (y_raw - y_mean) / y_std
-        loss = loss + point_weight * F.huber_loss(out["point"], pt_target, delta=huber_delta)
+        if point_loss == "huber":
+            point_term = F.huber_loss(out["point"], pt_target, delta=huber_delta)
+        else:
+            point_term = F.mse_loss(out["point"], pt_target)
+        loss = loss + point_weight * point_term
     return loss

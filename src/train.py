@@ -61,6 +61,7 @@ def train_model(net, loaders, cfg, device, out_dir="outputs",
     use_amp = bool(cfg["train"]["amp"]) and device == "cuda"
     point_weight = cfg["train"].get("point_loss_weight", 1.0)
     huber_delta = cfg["train"].get("huber_delta", 1.0)
+    point_loss = cfg["train"].get("point_loss", "mse")   # "mse" (mean, good R²) or "huber"
 
     # Standardise the point head's target using the TRAIN split's AQI mean/std (stored on the
     # model so it travels with the checkpoint and is used to de-standardise at inference).
@@ -89,7 +90,8 @@ def train_model(net, loaders, cfg, device, out_dir="outputs",
             x, y = x.to(device), y.to(device)
             opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda" if device == "cuda" else "cpu", enabled=use_amp):
-                loss = combined_loss(net(x), y, quantiles, point_weight, huber_delta, y_mean, y_std)
+                loss = combined_loss(net(x), y, quantiles, point_weight, huber_delta,
+                                     y_mean, y_std, point_loss)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()

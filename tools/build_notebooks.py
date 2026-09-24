@@ -845,7 +845,9 @@ Accuracy from the point head; the 90% interval from the conformal-calibrated qua
 apply **isotonic recalibration** (fit on the calibration set) to remove the systematic tail bias,
 and report **both** R² definitions (strict coefficient-of-determination `R2`, and squared-Pearson
 `r2_pearson` that looser papers quote). All in AQI points."""),
-    ("code", """cal = T.collect_outputs(net, loaders["cal"], device)
+    ("code", """# evaluate the BEST checkpoint (early stopping saved it), not the last epoch
+T.load_checkpoint(os.path.join(out_dir, "best_model.pth"), net, map_location=device)
+cal = T.collect_outputs(net, loaders["cal"], device)
 test = T.collect_outputs(net, loaders["test"], device)
 ymean, ystd = float(net.y_mean), float(net.y_std)
 cal_point = T.point_to_aqi(cal["point_out"], ymean, ystd)

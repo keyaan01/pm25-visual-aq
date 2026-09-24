@@ -37,6 +37,11 @@ from tqdm.auto import tqdm
 # The two physics channels are kept in [0, 1] (a common choice for auxiliary maps).
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+# Rough typical stats of the two physics maps (transmission, inverted-saturation). We standardise
+# them so they reach the ImageNet-pretrained stem at ~unit scale like the RGB channels — otherwise
+# their small [0,1] variance leaves them heavily down-weighted (the features that should generalise).
+PHYS_MEAN = np.array([0.70, 0.30], dtype=np.float32)
+PHYS_STD = np.array([0.20, 0.20], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +154,14 @@ def compute_maps(img, size=224, patch=15, omega=0.95, top_frac=0.001, t_min=0.05
 
 
 def assemble_five_channel(rgb01, t01, s01, imagenet_norm=True) -> np.ndarray:
-    """Stack into a (5, H, W) float32 tensor: normalised RGB + transmission + inv-sat."""
-    rgb = (rgb01 - IMAGENET_MEAN) / IMAGENET_STD if imagenet_norm else rgb01
-    hwc = np.concatenate([rgb, t01[..., None], s01[..., None]], axis=2)
+    """Stack into a (5, H, W) float32 tensor: normalised RGB + standardised transmission + inv-sat."""
+    phys = np.stack([t01, s01], axis=2)                       # (H, W, 2), values in [0, 1]
+    if imagenet_norm:
+        rgb = (rgb01 - IMAGENET_MEAN) / IMAGENET_STD
+        phys = (phys - PHYS_MEAN) / PHYS_STD                  # bring physics maps to ~unit scale
+    else:
+        rgb = rgb01
+    hwc = np.concatenate([rgb, phys], axis=2)
     return np.transpose(hwc, (2, 0, 1)).astype(np.float32)
 
 
