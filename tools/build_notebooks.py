@@ -901,6 +901,106 @@ rode on — a headline finding, measured on our own pipeline.
 backbone (`model.backbone`), EMA/TTA, seed ensemble."""),
 ]
 
+# ===========================================================================
+# 09_leakage.ipynb  (measure the leakage gap — the headline "story" result)
+# ===========================================================================
+LEAKAGE = [
+    ("md", """# The leakage gap — why the benchmark's 0.55 isn't what it seems
+
+**Goal:** show that the honest accuracy depends enormously on *how you split the data*, and that
+the benchmark's high R² is consistent with **station-level leakage** (photos from the same monitor —
+which share a near-identical daily-average label — landing in both train and test).
+
+We do two things in one session:
+1. **A split gradient** — train the *same* model on `random`, `temporal`, `station_grouped`,
+   `geographic` (and `shipped` as reference). Only the split changes. Expect
+   R²(random) ≫ R²(station_grouped).
+2. **A causal check (no extra training)** — inside the `random` run, compare accuracy on
+   *contaminated* test photos (same station/near-duplicate also in train) vs *clean* ones. If the
+   inflation lives in the contaminated part, leakage is the cause — not the test set being easier.
+
+> ⏳ This trains several models in one go (~2–3 h on a T4). Run it once and leave it. It saves a
+> results table you can paste back."""),
+
+    ("md", BOOTSTRAP_MD),
+    ("code", KAGGLE_BOOTSTRAP),
+
+    ("code", """import os, json, numpy as np, pandas as pd, matplotlib.pyplot as plt
+from src.config import load_config
+from src import data, physics, audit, leakage
+cfg = load_config()
+device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+WORK = "/kaggle/working"
+cache_path = os.path.join(WORK, "pm25_cache", "physics_maps_%d.npy" % cfg["data"]["image_size"])
+out_root = os.path.join(WORK, "pm25_outputs"); os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+
+ds, df = data.load_clean(cfg["data"]["hf_repo"], from_disk=False, seed=cfg["seed"])
+print("rows:", len(df))
+if not os.path.exists(cache_path):
+    physics.build_map_cache(len(ds), lambda i: data.get_image(ds, i), cache_path,
+        size=cfg["data"]["image_size"], patch=cfg["physics"]["dcp_patch"],
+        omega=cfg["physics"]["dcp_omega"], top_frac=cfg["physics"]["atmos_top_frac"], t_min=cfg["physics"]["t_min"])
+cache = physics.load_map_cache(cache_path)"""),
+
+    ("md", """## Train each split (same model, same seed — only the split differs)
+
+To save time you can trim `STRATEGIES` to `["random","station_grouped"]` (the core comparison)."""),
+    ("code", """STRATEGIES = ["random", "temporal", "station_grouped", "geographic", "shipped"]
+results, runs = [], {}
+for strat in STRATEGIES:
+    print("\\n=== training:", strat, "===")
+    r = leakage.train_and_evaluate(ds, df, cache, cfg, strat, device, out_root, verbose=False)
+    runs[strat] = r
+    rep = r["report"]
+    results.append({"split": strat, "R2": rep["R2"], "r2_pearson": rep["r2_pearson"],
+                    "MAE": rep["MAE"], "RMSE": rep["RMSE"], "SD_y_test": rep["SD_y_test"],
+                    "Spearman": rep["Spearman"], "coverage": rep["coverage"],
+                    "n_train": rep["n_train"], "n_test": rep["n_test"],
+                    "straddling": rep["straddling_stations"]})
+table = pd.DataFrame(results).set_index("split").round(3)
+table.to_csv(os.path.join(out_root, "leakage_gradient.csv"))
+table"""),
+
+    ("md", """## The headline number
+
+`Δ_leak` = how much a leaky random split inflates R² over the honest station-grouped split. We
+also show MAE (which, unlike R², doesn't depend on the test-set variance)."""),
+    ("code", """r_rand = table.loc["random"]; r_grp = table.loc["station_grouped"]
+print("Delta_leak (R2)  = %.3f  (random %.3f  vs  station_grouped %.3f)" % (r_rand.R2 - r_grp.R2, r_rand.R2, r_grp.R2))
+print("Delta_leak (MAE) = %.1f AQI (random %.1f vs station_grouped %.1f)" % (r_grp.MAE - r_rand.MAE, r_rand.MAE, r_grp.MAE))
+print("published baseline R2 = 0.55")"""),
+
+    ("md", """## Causal check: contaminated vs clean (random split, no extra training)
+
+We fingerprint every image (perceptual hash) and mark a random-split TEST photo as *contaminated*
+if its station or its near-duplicate group also appears in the random TRAIN set."""),
+    ("code", """rep = audit.redundancy_report(ds, df, hash_size=8, max_distance=5)
+dup_df = rep["df_with_groups"][["_row", "dup_group"]]
+cc = leakage.contaminated_vs_clean(runs["random"]["sp"], runs["random"]["test_df"], dup_df)
+print("contaminated fraction of random test set: %.1f%%" % (100*cc["contaminated_fraction"]))
+print("contaminated:", {k: round(v,3) if isinstance(v,float) else v for k,v in cc["contaminated"].items()})
+print("clean       :", {k: round(v,3) if isinstance(v,float) else v for k,v in cc["clean"].items()})
+print("(expect R2(contaminated) >> R2(clean) ~ R2(station_grouped) - inflation lives in the leaked part)")
+json.dump(cc, open(os.path.join(out_root, "contaminated_vs_clean.json"), "w"), indent=2)"""),
+
+    ("md", "## Gradient figure\nR² by split, with the paper's 0.55 and (if available) the C2 error-ceiling line."),
+    ("code", """order = [s for s in ["random","temporal","shipped","station_grouped","geographic"] if s in table.index]
+vals = table.loc[order, "R2"]
+plt.figure(figsize=(8,4)); plt.bar(order, vals, color="#4C78A8")
+plt.axhline(0.55, ls="--", c="#E45756", label="paper baseline 0.55")
+cj = os.path.join(out_root, "error_ceiling.json")
+if os.path.exists(cj):
+    r2max = json.load(open(cj)).get("R2_max")
+    if r2max is not None: plt.axhline(r2max, ls=":", c="green", label="C2 ceiling R²_max")
+plt.ylabel("R² (coefficient of determination)"); plt.title("Leakage gradient: how you split changes the score")
+plt.legend(); plt.xticks(rotation=15); plt.tight_layout(); plt.show()"""),
+
+    ("md", """## Done — paste me the table + the two contaminated/clean lines
+
+This is your paper's headline: the honest number, the leaky number, and *proof* the gap is leakage.
+Save Version to keep the checkpoints + `leakage_gradient.csv`."""),
+]
+
 if __name__ == "__main__":
     build("00_setup.ipynb", SETUP)
     build("01_data_audit.ipynb", AUDIT)
@@ -911,3 +1011,4 @@ if __name__ == "__main__":
     build("06_calibrate_evaluate.ipynb", EVAL)
     build("07_error_ceiling.ipynb", CEILING)
     build("kaggle_pipeline.ipynb", KAGGLE)
+    build("09_leakage.ipynb", LEAKAGE)

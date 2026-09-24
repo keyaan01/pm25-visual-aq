@@ -55,8 +55,20 @@ smoke-tested incl. headless kaggle run.
 setup) = R² 0.39/r 0.63; realistic ceiling ~0.3–0.45; the paper's 0.55 is almost certainly
 leakage-inflated. So low honest R² is expected/publishable, not a failure.
 
-**Next:** user runs kaggle_pipeline (fixed) → expect R² up toward ~0.3. Then `split.strategy: random`
-run → expect ~0.5 (measures leakage gap; explains 0.55). Then C2 ceiling; Stage B; C3 abstention.
+**MSE fix result (station_grouped, honest):** R²=0.22 (recalibrated), up from 0.16. Confirmed via
+3-agent audit that the old Huber(δ=1 std) point head was learning the MEDIAN (capped-gradient bug);
+MSE fixed it. Research (agent 3, cited) confirms honest R² 0.10–0.35 is the field-normal range;
+ceiling ~0.3–0.45; the paper's 0.55 is the leaky outlier. Extreme band (300+) is a real visual ceiling.
+
+**"Story" phase — best-practice designs from a 2nd 3-agent research pass (in the plan file under
+"BEST-PRACTICE BUILD").** Step A (leakage) BUILT: `src/leakage.py` (train_and_evaluate per split +
+contaminated_vs_clean causal analysis) + `notebooks/09_leakage.ipynb` (one Kaggle session trains all
+splits → gradient table + Delta_leak + contaminated/clean + gradient figure w/ 0.55 & ceiling lines).
+Locally smoke-tested. **Next: user runs 09_leakage (~2–3h one session)** → paste the table +
+contaminated/clean. Then build C2 upgrades (ceiling.py: level-reweight to p(m), split-specific Var(y),
+bootstrap CI, report as UPPER bound) and C3 (`src/abstain.py`: separate OOD gate [feature-distance,
+cal-only τ] + log-width uncertainty gate; risk-coverage/AURC + OOD AUROC/FPR95; needs
+`train.collect_features`). Then Phase 10 Gradio demo.
 
 **PM25Vision paper (arXiv 2509.16519) baseline facts:** EfficientNet-B0 R²=0.550/MAE=36.6/RMSE=54.6
 on an **80/20 split** (= the shipped station-disjoint split). Paper gives NO target/loss/preproc/
