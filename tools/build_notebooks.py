@@ -19,36 +19,44 @@ NB_DIR.mkdir(exist_ok=True)
 
 # The one bootstrap cell reused at the top of every notebook. The user sets REPO_URL
 # once. It is safe to re-run and works locally too (no clone if `src/` is already here).
-BOOTSTRAP = '''# === Bootstrap — RUN ME FIRST (set REPO_URL to your repo) ===
-REPO_URL = "https://github.com/YOUR_USERNAME/pm25-visual-aq.git"   # <-- EDIT THIS
+BOOTSTRAP = '''# === Bootstrap — RUN ME FIRST ===
+REPO_URL = "https://github.com/keyaan01/pm25-visual-aq.git"   # <-- your repo
 
-import os, sys, subprocess
+import os, sys, shutil, subprocess
 
-def _find_repo_root():
-    # Are we already inside the repo (or just above the notebooks/ folder)?
-    for cand in (".", "..", "pm25-visual-aq"):
-        if os.path.isdir(os.path.join(cand, "src")):
-            return os.path.abspath(cand)
-    return None
+# Where the clone lives: Kaggle -> /kaggle/working ; Colab/local -> current dir.
+BASE = "/kaggle/working" if os.path.isdir("/kaggle/working") else os.getcwd()
+ON_KAGGLE = os.path.isdir("/kaggle/working")
 
-_root = _find_repo_root()
-if _root is None:                       # fresh session: clone the code
-    subprocess.run(["git", "clone", "--depth", "1", REPO_URL, "pm25-visual-aq"], check=True)
-    _root = os.path.abspath("pm25-visual-aq")
-else:                                   # reused clone (e.g. a stale Kaggle dir): pull the latest
-    subprocess.run(["git", "-C", _root, "pull", "--ff-only"], check=False)
-os.chdir(_root)
-if _root not in sys.path:
-    sys.path.insert(0, _root)
+def _valid_repo(p):   # a REAL checkout of THIS repo, not a rogue/partial `src` left in the workdir
+    return (os.path.exists(os.path.join(p, "src", "ceiling.py"))
+            and os.path.exists(os.path.join(p, "configs", "default.yaml")))
+
+if not ON_KAGGLE and _valid_repo("."):   # local/Colab dev already inside the repo -> use it as-is
+    REPO = os.path.abspath(".")
+else:                                    # Kaggle (or not in a repo): ALWAYS re-clone fresh
+    REPO = os.path.join(BASE, "pm25-visual-aq")
+    os.chdir(BASE)                       # don't stand inside the dir we're about to delete
+    shutil.rmtree(REPO, ignore_errors=True)   # kill any stale / partial / rogue clone
+    subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO], check=True)
+
+os.chdir(REPO)
+sys.path.insert(0, REPO)
+for _m in [k for k in list(sys.modules) if k == "src" or k.startswith("src.")]:
+    del sys.modules[_m]                  # evict any `src` already imported from a stale location
+# Fail LOUD if the checkout is incomplete (never silently import a namespace-package `src`):
+assert os.path.exists(os.path.join(REPO, "src", "ceiling.py")), "clone incomplete (is Internet On?) -- src/ceiling.py missing at " + REPO
+
+subprocess.run(["pip", "install", "-q", "-r", "requirements.txt"], check=False)
 
 IN_COLAB = "google.colab" in sys.modules
 if IN_COLAB:
-    subprocess.run(["pip", "install", "-q", "-r", "requirements.txt"], check=False)
     from google.colab import drive
     if not os.path.ismount("/content/drive"):
         drive.mount("/content/drive")
 
-print("repo root:", _root, "| Colab:", IN_COLAB)'''
+_head = subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+print("repo:", REPO, "| HEAD:", _head, "| Colab:", IN_COLAB)'''
 
 BOOTSTRAP_MD = """## Bootstrap — run this first
 
@@ -762,11 +770,12 @@ print("  2024 EPA revision:                        %.3f" % res_2024["R2_max"])""
 
     ("md", """## Save for the paper"""),
     ("code", """import os, json
-os.makedirs(cfg["data"]["outputs_dir"], exist_ok=True)
+# On Kaggle save to /kaggle/working/pm25_outputs (where 09_leakage reads it); else the config dir.
+OUT = "/kaggle/working/pm25_outputs" if os.path.isdir("/kaggle/working") else cfg["data"]["outputs_dir"]
+os.makedirs(OUT, exist_ok=True)
 res["R2_max_2024"] = res_2024["R2_max"]
-json.dump(res, open(os.path.join(cfg["data"]["outputs_dir"], "error_ceiling.json"), "w"),
-          indent=2, default=float)
-print("saved error_ceiling.json  (09_leakage draws its ceiling line from this file)")"""),
+json.dump(res, open(os.path.join(OUT, "error_ceiling.json"), "w"), indent=2, default=float)
+print("saved", os.path.join(OUT, "error_ceiling.json"), "(09_leakage reads its ceiling line from here)")"""),
 
     ("md", """## Reading the result
 
@@ -790,20 +799,24 @@ Paste these numbers back and I'll write them into `docs/RESULTS.md`.
 # ===========================================================================
 KAGGLE_BOOTSTRAP = '''# === Kaggle bootstrap — RUN ME FIRST ===
 # In the right sidebar: Accelerator = GPU T4, Internet = ON (needs a phone-verified account).
-REPO_URL = "https://github.com/YOUR_USERNAME/pm25-visual-aq.git"   # <-- EDIT THIS
+REPO_URL = "https://github.com/keyaan01/pm25-visual-aq.git"   # <-- your repo
 
-import os, sys, subprocess
-REPO = "/kaggle/working/pm25-visual-aq"
-if not os.path.isdir(REPO):
-    subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO], check=True)
-else:                                   # reused clone: pull the latest so code is never stale
-    subprocess.run(["git", "-C", REPO, "pull", "--ff-only"], check=False)
+import os, sys, shutil, subprocess
+BASE = "/kaggle/working"
+REPO = os.path.join(BASE, "pm25-visual-aq")
+os.chdir(BASE)
+shutil.rmtree(REPO, ignore_errors=True)          # ALWAYS start clean -> never a stale/rogue clone
+subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO], check=True)
 os.chdir(REPO)
 sys.path.insert(0, REPO)
+for _m in [k for k in list(sys.modules) if k == "src" or k.startswith("src.")]:
+    del sys.modules[_m]
+assert os.path.exists(os.path.join(REPO, "src", "ceiling.py")), "clone incomplete (is Internet On?) -- src/ceiling.py missing"
 subprocess.run(["pip", "install", "-q", "-r", "requirements.txt"], check=False)
 
 import torch
-print("repo:", os.getcwd())
+_head = subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+print("repo:", os.getcwd(), "| HEAD:", _head)
 print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "NONE — set Accelerator=GPU")'''
 
 KAGGLE = [

@@ -106,6 +106,9 @@ def conditional_noise_curve(per_day, edges=AQI_BAND_EDGES) -> pd.DataFrame:
 
     Columns: band, band_lo, band_hi, n_days, v (mean within_day_var), rmse_hours (sqrt v).
     """
+    cols = ["band", "band_idx", "band_lo", "band_hi", "n_days", "v", "rmse_within_day"]
+    if len(per_day) == 0 or "day_mean_aqi" not in per_day.columns:
+        return pd.DataFrame(columns=cols)                      # nothing to bin (empty fetch)
     p = per_day.copy()
     p["band"] = np.digitize(p["day_mean_aqi"], np.asarray(edges[1:-1]))
     rows = []
@@ -225,6 +228,11 @@ def compute_ceiling(hourly, dataset_labels, var_labels, station_col="location_id
     draw the ceiling line) plus the v(m) curve for the error-by-band story.
     """
     _, per_day = within_day_aqi_variance(hourly, station_col, time_col, ugm3_col, min_hours, table)
+    if len(per_day) == 0:
+        raise ValueError(
+            "No station-days had >= %d hourly readings, so the ceiling can't be estimated. "
+            "Check that Internet is On and the OpenAQ key is valid, widen the date window, "
+            "or lower min_hours." % min_hours)
     var_eps, curve = level_reweighted_var_epsilon(per_day, dataset_labels, edges)
     devs = within_day_deviations(hourly, station_col, time_col, ugm3_col, min_hours, table)
     out = error_ceiling(var_eps, var_labels, deviations=devs, coverage=coverage)

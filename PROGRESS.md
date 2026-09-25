@@ -44,7 +44,18 @@ Var(y), R²_max reported as an UPPER bound, empirical 5–95 percentile interval
 `compute_ceiling` that saves everything to `outputs/error_ceiling.json` (so `09_leakage` draws the
 ceiling line). `tests/smoke_ceiling.py` verifies it all incl. a hand-computed reweighting value
 (=175.0); 2024 breakpoints selectable + monotonic. `notebooks/07_error_ceiling.ipynb` + `docs/08_error_ceiling.md`
-updated and notebooks regenerated. **Next: user runs `07_error_ceiling` with a free OpenAQ key**
+updated and notebooks regenerated.
+
+**Bootstrap hardened (2026-09-25) — recurring Kaggle `ImportError: cannot import name 'ceiling' from
+'src' (unknown location)` fixed.** A 2-agent read-only audit root-caused it: 07 shipped the Colab
+`BOOTSTRAP` whose `_find_repo_root()` latched onto a leftover/rogue `src` in the persistent
+`/kaggle/working` and never re-cloned (shallow `git pull --ff-only` silently failed to refresh). Fix:
+**all bootstraps now re-clone FRESH every run** (`shutil.rmtree` + `git clone`), evict any stale `src`
+from `sys.modules`, `assert src/ceiling.py` exists (fail loud, never a namespace package), and
+`pip install -r requirements.txt` unconditionally; `REPO_URL` hardcoded to the user's repo. Also
+fixed 07 to save `error_ceiling.json` to `/kaggle/working/pm25_outputs` (so 09 reads it) and guarded
+`compute_ceiling` against empty OpenAQ data (clean `ValueError`, not `KeyError`). All notebooks
+regenerated + compile-checked; smoke suites pass. **Next: user runs `07_error_ceiling` with a free OpenAQ key**
 (explore.openaq.org, no GPU) → paste R²_max + CI + the 2012/2024 band. Then **C3** (abstention:
 `src/abstain.py` + `notebooks/08_abstention.ipynb`) → Phase 10 Gradio demo.
 

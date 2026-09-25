@@ -98,10 +98,24 @@ def test_bootstrap_and_compute():
     print(f"[ceiling] bootstrap CI [{ci['R2_max_lo']:.3f},{ci['R2_max_hi']:.3f}] + compute_ceiling OK")
 
 
+def test_empty_data_clean_error():
+    empty = pd.DataFrame(columns=["location_id", "datetime", "pm25_ugm3"])
+    _, per_day = Cg.within_day_aqi_variance(empty, min_hours=18)
+    curve = Cg.conditional_noise_curve(per_day)       # must NOT raise a KeyError on empty input
+    assert len(curve) == 0 and "band_idx" in curve.columns
+    try:
+        Cg.compute_ceiling(empty, [10.0, 20.0, 30.0], var_labels=2500.0)
+        assert False, "expected a ValueError on empty OpenAQ data"
+    except ValueError as e:
+        assert "station-days" in str(e)
+    print("[ceiling] empty-data path raises a clean ValueError (not KeyError) OK")
+
+
 if __name__ == "__main__":
     test_breakpoints_2024()
     test_within_day_and_deviations()
     test_level_reweighting_handcomputed()
     test_error_ceiling_and_floor()
     test_bootstrap_and_compute()
+    test_empty_data_clean_error()
     print("\nALL C2 CEILING SMOKE CHECKS PASSED")
