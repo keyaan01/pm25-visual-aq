@@ -32,9 +32,11 @@ def _find_repo_root():
     return None
 
 _root = _find_repo_root()
-if _root is None:                       # fresh Colab session: clone the code
+if _root is None:                       # fresh session: clone the code
     subprocess.run(["git", "clone", "--depth", "1", REPO_URL, "pm25-visual-aq"], check=True)
     _root = os.path.abspath("pm25-visual-aq")
+else:                                   # reused clone (e.g. a stale Kaggle dir): pull the latest
+    subprocess.run(["git", "-C", _root, "pull", "--ff-only"], check=False)
 os.chdir(_root)
 if _root not in sys.path:
     sys.path.insert(0, _root)
@@ -789,6 +791,8 @@ import os, sys, subprocess
 REPO = "/kaggle/working/pm25-visual-aq"
 if not os.path.isdir(REPO):
     subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO], check=True)
+else:                                   # reused clone: pull the latest so code is never stale
+    subprocess.run(["git", "-C", REPO, "pull", "--ff-only"], check=False)
 os.chdir(REPO)
 sys.path.insert(0, REPO)
 subprocess.run(["pip", "install", "-q", "-r", "requirements.txt"], check=False)
