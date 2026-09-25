@@ -719,14 +719,19 @@ print("hourly rows fetched:", len(hourly), "| stations:", hourly["location_id"].
 hourly.head()"""),
 
     ("md", "## Compute the ceiling (level-reweighted, split-specific, with a bootstrap CI)"),
-    ("code", """from src.config import load_config
+    ("code", """import os
+from src.config import load_config
 from src import data, splits as S
 import numpy as np
 cfg = load_config()
 
 # The ceiling is SPLIT-SPECIFIC: Var(y) = the label variance of the split we headline
 # (station-grouped, leakage-safe). p(m) for level-reweighting = the whole dataset's label mix.
-_, df = data.load_clean(cfg["data"]["drive_path"], from_disk=True, seed=cfg["seed"])
+# Load labels from Drive if present (Colab), else straight from HuggingFace (Kaggle). We only need
+# the label + station/coord columns here, not the images or the physics cache.
+_drive = cfg["data"]["drive_path"]
+_, df = (data.load_clean(_drive, from_disk=True, seed=cfg["seed"]) if os.path.isdir(_drive)
+         else data.load_clean(cfg["data"]["hf_repo"], from_disk=False, seed=cfg["seed"]))
 sp = S.make_splits(df, strategy="station_grouped", seed=cfg["seed"],
                    station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
                    lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
