@@ -42,22 +42,6 @@ def apply_conformal(preds: np.ndarray, Q: float) -> np.ndarray:
     return out
 
 
-def smearing_factor(point_log: np.ndarray, y_log: np.ndarray) -> float:
-    """Duan's smearing estimate: the correction for the log→AQI retransformation bias.
-
-    A point head trained in log space predicts E[log(y)], and exp(E[log y]) systematically
-    *under*-estimates E[y] for skewed data. Multiplying by the average of exp(residuals) on
-    the calibration set removes that bias, giving a much better mean estimate (higher R²).
-    """
-    residuals = np.asarray(y_log) - np.asarray(point_log)
-    return float(np.mean(np.exp(residuals)))
-
-
-def apply_point(point_log: np.ndarray, smear: float) -> np.ndarray:
-    """Convert log-space point predictions to AQI with the smearing correction, clip at 0."""
-    return np.maximum(np.exp(np.asarray(point_log)) * smear, 0.0)
-
-
 def coverage(preds: np.ndarray, y: np.ndarray) -> float:
     """Fraction of points whose true value lies within [q_lo, q_hi]."""
     inside = (y >= preds[:, 0]) & (y <= preds[:, -1])

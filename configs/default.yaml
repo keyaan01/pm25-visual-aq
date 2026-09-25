@@ -32,7 +32,7 @@ model:                                  # EfficientNet-B0 (paper Sec 3.6)
   backbone: efficientnet_b0            # Stage B search: efficientnet_b2 / tf_efficientnetv2_s / convnext_tiny
   in_chans: 5                          # R, G, B, transmission, inverted-saturation
   pretrained: true
-  point_head: true                     # dedicated Huber-trained point estimate for accuracy (Phase 5b)
+  point_head: true                     # dedicated MSE-trained point estimate (mean-seeking, good R²)
   drop_path_rate: 0.2                  # stochastic depth — regularises the small (~7k) dataset (Stage A)
 
 quantiles: [0.05, 0.50, 0.95]           # the three heads (paper Sec 3.6-3.7)
@@ -52,7 +52,7 @@ train:                                  # optimisation (paper Sec 3.12)
   balanced_sampling: true              # oversample rare high-AQI photos in TRAIN only (Phase 5b)
   balance_power: 1.0                   # 0 = natural, 1 = full inverse-frequency (strong; targets the rare high-AQI tail)
   recalibrate: true                    # isotonic recalibration of the point estimate on cal (removes tail bias)
-  early_stop_metric: cal_point_mae     # what early stopping minimises (accuracy-aligned, Stage A)
+  early_stop_metric: cal_point_mae     # documents the fixed behaviour: early stop on calibration point-MAE
   # --- Stage B/C (added when we get there) ---
   ema: false                           # exponential moving average of weights (Stage B)
   tta: false                           # test-time augmentation at eval (Stage B)

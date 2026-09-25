@@ -206,6 +206,13 @@ def five_channel_cached(img, cache, row, size=224, imagenet_norm=True) -> np.nda
     `img` is the PIL photo (RGB is cheap to decode+resize); the two physics maps are read
     from `cache[row]` instead of recomputed.
     """
+    if row >= cache.shape[0]:
+        raise IndexError(
+            f"cache row {row} out of range for a cache of length {cache.shape[0]} — "
+            "the cache must be built with n=len(ds) (the pooled dataset size), because `_row` "
+            "indexes the full pooled dataset.")
+    if cache.shape[-1] != size:
+        raise ValueError(f"cached map size {cache.shape[-1]} != requested size {size}")
     rgb = np.asarray(Image.fromarray(
         (to_float_rgb(img) * 255).astype(np.uint8)).resize((size, size), Image.BILINEAR),
         dtype=np.float32) / 255.0

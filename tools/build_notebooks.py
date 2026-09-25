@@ -584,9 +584,10 @@ print("device:", device)"""),
     ("md", """## Evaluate a trained model
 
 `evaluate_strategy` rebuilds that split, loads its checkpoint, and predicts on calibration +
-test. **Accuracy** (MAE/RMSE/R²) comes from the **point head** with the smearing bias-correction;
-the **interval** (coverage/width) comes from the conformal-calibrated quantiles. It saves **Q**
-and the **smearing factor** next to the checkpoint so the demo (Phase 10) can reuse them."""),
+test. **Accuracy** (MAE/RMSE/R²) comes from the **point head**, de-standardised from its z-score
+output back to AQI (it is trained with MSE, so it estimates the conditional mean — what R² rewards);
+the **interval** (coverage/width) comes from the conformal-calibrated quantiles. It saves **Q** and
+the point head's mean/std next to the checkpoint so the demo (Phase 10) can reuse them."""),
     ("code", """import numpy as np
 def evaluate_strategy(strategy):
     sp = splits.make_splits(df, strategy=strategy, seed=cfg["seed"],
@@ -677,10 +678,15 @@ Pollution genuinely swings within a day, so even a *perfect* model reading the e
 instantaneous pollution from a photo would be "wrong" versus a daily-average label. That
 gap is noise no model can beat — a hard ceiling on achievable R².
 
-We estimate it as **R²_max = 1 − Var(ε) / Var(y)**, where `Var(y)` is the variance of our
-daily-average AQI labels and `Var(ε)` is the *average within-day variance* of AQI, measured
-from **hourly** reference data (OpenAQ). This tells us how much room actually remains above
-the published R²=0.55."""),
+We estimate **R²_max = 1 − Var(ε) / Var(y)** and report it explicitly as an **UPPER bound**
+(it accounts for *label noise only* — a real model also loses accuracy to limited visual signal,
+imbalance and domain shift, so the honest R² can sit well below R²_max with no bug). Two
+best-practice refinements: `Var(y)` is the **station-grouped test split's** label variance (the
+ceiling is split-specific), and `Var(ε)` is **level-reweighted** — we measure the within-day noise
+*curve* v(m) by pollution level from **hourly** reference data (OpenAQ) and reweight it to
+PM25Vision's own label mix p(m). We add a station cluster-**bootstrap 95% CI** and a
+**2012-vs-2024 breakpoint** sensitivity check. This tells us how much room really remains above the
+honest R²=0.22 (and whether the published R²=0.55 is even physically attainable)."""),
 
     ("md", BOOTSTRAP_MD),
     ("code", BOOTSTRAP),
@@ -693,52 +699,79 @@ the published R²=0.55."""),
     ("code", """OPENAQ_API_KEY = "PASTE_YOUR_OPENAQ_KEY_HERE"   # <-- from explore.openaq.org
 assert OPENAQ_API_KEY != "PASTE_YOUR_OPENAQ_KEY_HERE", "Add your OpenAQ API key first." """),
 
-    ("md", """## Fetch hourly PM2.5 from a global sample of stations
+    ("md", """## Fetch hourly PM2.5 from a region-stratified sample of stations
 
-We pull ~40 stations' hourly readings over a recent 45-day window. Exact matching to
-PM25Vision's stations isn't needed — we want a defensible estimate of typical within-day
-AQI variance."""),
+We pull ~40 stations' hourly readings over a recent 45-day window, **capping stations per country**
+so the sample spreads across regions (not dominated by whichever country OpenAQ lists first). Exact
+matching to PM25Vision's stations isn't needed — we want a defensible estimate of the within-day AQI
+variance *curve*."""),
     ("code", """import datetime as dt
 from src import ceiling as CE
 to = dt.date.today()
 frm = to - dt.timedelta(days=45)
 hourly = CE.fetch_openaq_hourly(OPENAQ_API_KEY,
                                 date_from=frm.isoformat(), date_to=to.isoformat(),
-                                n_locations=40)
-print("hourly rows fetched:", len(hourly), "| stations:", hourly["location_id"].nunique())
+                                n_locations=40, max_per_country=6)
+print("hourly rows fetched:", len(hourly), "| stations:", hourly["location_id"].nunique(),
+      "| countries:", hourly["country"].nunique())
 hourly.head()"""),
 
-    ("md", "## Compute Var(ε) and the ceiling"),
+    ("md", "## Compute the ceiling (level-reweighted, split-specific, with a bootstrap CI)"),
     ("code", """from src.config import load_config
-from src import data
+from src import data, splits as S
+import numpy as np
 cfg = load_config()
 
-var_eps, per_day = CE.within_day_aqi_variance(hourly)
+# The ceiling is SPLIT-SPECIFIC: Var(y) = the label variance of the split we headline
+# (station-grouped, leakage-safe). p(m) for level-reweighting = the whole dataset's label mix.
 _, df = data.load_clean(cfg["data"]["drive_path"], from_disk=True, seed=cfg["seed"])
-var_labels = float(df["pm25"].var())
+sp = S.make_splits(df, strategy="station_grouped", seed=cfg["seed"],
+                   station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
+                   lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
+var_labels = float(np.var(sp.loc[sp["split"] == "test", "pm25"].to_numpy()))
+dataset_labels = df["pm25"].to_numpy()
 
-res = CE.error_ceiling(var_eps, var_labels)
-print("Var(eps)  (within-day AQI variance): %.1f  (std ~ %.1f AQI)" % (var_eps, var_eps**0.5))
-print("Var(y)    (dataset label variance):  %.1f  (std ~ %.1f AQI)" % (var_labels, var_labels**0.5))
+res = CE.compute_ceiling(hourly, dataset_labels, var_labels, min_hours=18, n_boot=1000)
+print("Var(eps) level-reweighted:        %.1f  (std ~ %.1f AQI)" % (res["var_epsilon"], res["var_epsilon"]**0.5))
+print("Var(y) station-grouped test:      %.1f  (SD  ~ %.1f AQI)" % (var_labels, var_labels**0.5))
 print("--------")
-print("R2_max (best achievable R2): %.3f" % res["R2_max"])
-print("published baseline R2:       0.550")
-print("honest interval-width floor: ~%.1f AQI (a range narrower than this over-claims)" % res["interval_width_floor"])"""),
+print("R2_max (UPPER bound, label noise only): %.3f  [95%% CI %.3f - %.3f]"
+      % (res["R2_max"], res["R2_max_lo"], res["R2_max_hi"]))
+print("honest R2 we measured (station-grouped): 0.220   |   published baseline: 0.550")
+print("honest interval-width floor: ~%.1f AQI (a 90%% range narrower than this over-claims)" % res["interval_width_floor"])
+print("based on %d station-days from %d stations" % (res["n_station_days"], res["n_stations"]))"""),
+
+    ("md", "### The within-day noise curve v(m) + a 2012-vs-2024 breakpoint sensitivity check"),
+    ("code", """import pandas as pd
+from src.aqi import PM25_BREAKPOINTS_2024
+print("v(m): within-day AQI variance by pollution level (this is the error-by-band story)")
+display(pd.DataFrame(res["curve"])[["band", "n_days", "v", "rmse_within_day", "p_reweighted"]])
+
+res_2024 = CE.compute_ceiling(hourly, dataset_labels, var_labels, min_hours=18,
+                              table=PM25_BREAKPOINTS_2024, n_boot=200)
+print("R2_max sensitivity to the AQI breakpoint convention:")
+print("  historical (the labels' own convention): %.3f" % res["R2_max"])
+print("  2024 EPA revision:                        %.3f" % res_2024["R2_max"])"""),
 
     ("md", """## Save for the paper"""),
     ("code", """import os, json
 os.makedirs(cfg["data"]["outputs_dir"], exist_ok=True)
-json.dump({**res, "n_station_days": int(len(per_day))},
-          open(os.path.join(cfg["data"]["outputs_dir"], "error_ceiling.json"), "w"), indent=2)
-print("saved error_ceiling.json")"""),
+res["R2_max_2024"] = res_2024["R2_max"]
+json.dump(res, open(os.path.join(cfg["data"]["outputs_dir"], "error_ceiling.json"), "w"),
+          indent=2, default=float)
+print("saved error_ceiling.json  (09_leakage draws its ceiling line from this file)")"""),
 
     ("md", """## Reading the result
 
-- If **R²_max is well above 0.55**, there's real room to improve over the published baseline.
-- If it's **close to 0.55**, the published result may already be near the best possible given
-  daily-average labels — itself a strong, honest finding for the paper.
-- The **width floor** sets a lower bound on honest interval width: no interval should be
-  narrower than the label noise itself.
+- **R²_max is an UPPER bound** (label noise only). The honest gap between our 0.22 and R²_max is the
+  room that *better vision* could recover; the gap between R²_max and 1.0 is forever lost to
+  daily-average labels.
+- **If R²(random) from `09_leakage` (0.759) exceeds R²_max, that split is *provably* leaky** — no
+  honest model can beat the label-noise ceiling, so a score above it can only come from leakage. The
+  `error_ceiling.json` saved here is what draws the ceiling line on the leakage-gradient figure.
+- The **width floor** is a lower bound on honest 90% interval width: no interval should be narrower
+  than the pollution's own within-day spread.
+- The **95% CI** and the **2012-vs-2024** sensitivity show the estimate is robust, not a single fragile number.
 
 Paste these numbers back and I'll write them into `docs/RESULTS.md`.
 

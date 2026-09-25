@@ -93,8 +93,13 @@ def make_splits(
     if strategy == "random":
         out["split"] = _row_split(len(out), fractions, seed)
     elif strategy == "station_grouped":
+        # A NaN station would be dropped silently by groupby/map (rows vanish from ALL splits),
+        # so guard against it rather than lose rows without noticing.
+        assert out[station_col].notna().all(), f"{station_col} has NaN values — would silently drop rows"
         out["split"] = _group_split(out[station_col], fractions, seed)
     elif strategy == "geographic":
+        assert out[[lat_col, lon_col]].notna().all().all(), \
+            "latitude/longitude has NaN values — would silently drop rows"
         cells = _geo_cell(out, lon_col, lat_col, geo_cell_deg)
         out["split"] = _group_split(cells, fractions, seed)
     elif strategy == "shipped":
@@ -102,6 +107,7 @@ def make_splits(
         # We still need a calibration set, so we carve it (station-grouped) out of their TRAIN rows.
         if "orig_split" not in out.columns:
             raise ValueError("shipped split needs 'orig_split' (load via load_pooled on a DatasetDict)")
+        assert out[station_col].notna().all(), f"{station_col} has NaN values — would silently drop rows"
         lab = np.where(out["orig_split"].to_numpy() == "test", "test", "train").astype(object)
         train_idx = np.where(lab == "train")[0]
         cal_frac = fractions[1] / (fractions[0] + fractions[1])  # cal share OF the train portion

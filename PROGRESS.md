@@ -4,138 +4,107 @@
 > later session, **read this first**, then `docs/` for details and the approved plan at
 > `~/.claude/plans/this-is-the-output-steady-hearth.md`.
 
-**Last updated:** **Stage A (max-accuracy) + Kaggle pivot built.** Colab free GPU hit its limit →
-switched to Kaggle. Standardized point head (Huber on z-scored AQI — robust, no smearing blow-up),
-early-stop on cal point-MAE, class-balanced sampling, drop_path. All locally smoke-tested incl. a
-headless end-to-end run of `kaggle_pipeline.ipynb`. **Awaiting user's Kaggle run** (Stage A) to
-compare R²/MAE vs the 0.153 baseline. Then Stage B (backbone/EMA/TTA), Stage C (ensemble), C3, demo.
+**Last updated (2026-09-25):** **The leakage story is done, verified, and documented.** The headline
+experiment ran as one Kaggle *commit* (headless) job and produced the project's central result:
 
-**Key design note:** point head predicts a STANDARDIZED target (mean/std stored as model buffers,
-travel in the checkpoint). Earlier raw-direct underpredicted (slow to reach scale) and log+smearing
-was numerically UNSTABLE (smear exploded) — standardization fixed both. `point_to_aqi(out, y_mean,
-y_std)` de-standardizes; no smearing anywhere now.
+- Honest **station-grouped R² = 0.220** (MAE 54.2, Spearman 0.649, coverage 0.872).
+- Leaky **random R² = 0.759** → **Δ_leak(R²) = 0.539**. The random split even exceeds the paper's 0.55;
+  no station-disjoint split reaches 0.55 (shipped 0.378, geographic −0.079).
+- Causal clincher: within the random test set, **contaminated R² = 0.762 vs clean R² = −0.86** — the
+  inflation lives entirely in the leaked photos.
 
-**Result history (station_grouped, honest):**
-- pre-5b: R²=0.153, MAE=55.5, Spearman=0.715.
-- Stage A (Kaggle, standardized point head + balanced + drop_path): R²=0.164, MAE=53.5,
-  Spearman=0.665, coverage=0.881, mean_width=164. **Barely moved** — because the bottleneck is NOT
-  the objective, it's the **300+ AQI band (MAE 287, n=173)** which likely hits a visual ceiling
-  (a photo can't tell AQI 300 from 500). Model is actually decent for AQI<200 (MAE 22–47).
-- Open question: gap to published 0.55 (RGB-only baseline). Hypotheses to TEST: (a) our physics
-  channels may be hurting — added an **RGB-only ablation toggle** (`model.in_chans: 3`); (b) our
-  test split may be harder. Also need C2 ceiling to know how much is irreducible.
+A **3-agent read-only correctness audit** (data/physics, model/loss/training, splits/calibration/
+metrics/leakage) found **no result-affecting bug**: leakage prediction↔row ordering correct, physics
+cache↔image alignment correct, splits station-disjoint by construction, conformal coverage math correct
+(sim 0.9006), point head genuinely mean-seeking, every results-table row reconciles R²≈1−(RMSE/SD)².
+Minor cleanups from the audit have been applied (see "Hardening" below).
 
-**Experiment results so far (station_grouped honest, unless noted):**
-- physics 5-ch, Stage A: R²=0.164, MAE=53.5.
-- RGB-only (in_chans=3) + shipped 80/20 split (reproduce paper): **R²=0.132** — WORSE than physics,
-  nowhere near their 0.55. So physics isn't hurting and split choice isn't it.
-- Diagnosis (research-backed): (a) their 0.55 almost certainly used a RANDOM (station-leaky) split;
-  (b) our model underpredicts the rare high-AQI tail (deep imbalanced regression).
+**Documentation written this session:** `docs/RESULTS.md` (the full results ledger / story arc),
+`docs/10_leakage.md` (beginner narrative of the leakage experiment), `docs/CODE_WALKTHROUGH.md`
+(the essential code embedded + explained, teacher-facing).
 
-**Accuracy fix implemented (this session):** `balance_power` 0.5→1.0 (strong tail sampling);
-**isotonic recalibration** of the point estimate on cal (`src/recalibrate.py` — removes systematic
-tail bias, no retrain); metrics now report BOTH `R2` (coeff. of determination, strict/field-standard)
-and `r2_pearson` (squared correlation, what loose papers quote). Config reset to honest primary
-(in_chans=5, station_grouped, recalibrate=true). Kaggle notebook reports raw vs recalibrated.
+**Method note (the honest pipeline):** 5-channel physics input → EfficientNet-B0 → monotone quantile
+heads (calibrated intervals) **plus** a dedicated **MSE point head on a standardized target** (estimates
+the conditional mean → good R²). Intervals via Conformalized Quantile Regression (~90% coverage); point
+estimate de-standardized then isotonic-recalibrated on the calibration split. Primary evaluation split is
+**station-grouped** (leakage-safe); `random` is the constructed leaky control.
 
-**ROOT CAUSE of stuck R² (found via 3-agent audit + confirmed synthetically):** the point head used
-**Huber loss with delta=1.0 in STANDARDIZED units** → 1σ≈57 AQI, so all high-AQI targets fell in
-Huber's capped-gradient (L1) region → the head learned the **median, not the mean** → underpredicted
-the skewed tail → low R² despite good Spearman. Synthetic proof: fitting a skewed target, MSE→0.500
-(true mean), Huber(δ=1)→0.11 (≈median). This is why balancing + isotonic hadn't helped.
+**Hardening applied this session (low-risk, no rerun needed):** fixed stale docstrings/comments that
+described the point head as "Huber-trained + smearing" (it is MSE + standardize + isotonic); removed
+unused functions (`calibrate.smearing_factor`/`apply_point`, `train.evaluate_loss`/`collect_predictions`);
+added defensive asserts (`splits.make_splits` guards NaN station/lat/lon; `physics.five_channel_cached`
+guards cache bounds/size). All local smoke tests still pass.
 
-**Fixes implemented (this session):** (1) point head now trained with **MSE** (mean-seeking, good R²)
-— `train.point_loss: mse`, `losses.combined_loss` MSE branch; (2) Kaggle notebook now **reloads the
-best checkpoint** before eval (was using last epoch); (3) **physics channels standardized**
-(`physics.PHYS_MEAN/STD` in `assemble_five_channel`) so they're not down-weighted. All locally
-smoke-tested incl. headless kaggle run.
-
-**Literature reality check (agent 3, with citations):** honest R² ~0.16 is IN the defensible range
-(0.10–0.35) for single-image daily-avg station-disjoint AQI; closest analogue Mondal 2024 (easier
-setup) = R² 0.39/r 0.63; realistic ceiling ~0.3–0.45; the paper's 0.55 is almost certainly
-leakage-inflated. So low honest R² is expected/publishable, not a failure.
-
-**MSE fix result (station_grouped, honest):** R²=0.22 (recalibrated), up from 0.16. Confirmed via
-3-agent audit that the old Huber(δ=1 std) point head was learning the MEDIAN (capped-gradient bug);
-MSE fixed it. Research (agent 3, cited) confirms honest R² 0.10–0.35 is the field-normal range;
-ceiling ~0.3–0.45; the paper's 0.55 is the leaky outlier. Extreme band (300+) is a real visual ceiling.
-
-**"Story" phase — best-practice designs from a 2nd 3-agent research pass (in the plan file under
-"BEST-PRACTICE BUILD").** Step A (leakage) BUILT: `src/leakage.py` (train_and_evaluate per split +
-contaminated_vs_clean causal analysis) + `notebooks/09_leakage.ipynb` (one Kaggle session trains all
-splits → gradient table + Delta_leak + contaminated/clean + gradient figure w/ 0.55 & ceiling lines).
-Locally smoke-tested. **Next: user runs 09_leakage (~2–3h one session)** → paste the table +
-contaminated/clean. Then build C2 upgrades (ceiling.py: level-reweight to p(m), split-specific Var(y),
-bootstrap CI, report as UPPER bound) and C3 (`src/abstain.py`: separate OOD gate [feature-distance,
-cal-only τ] + log-width uncertainty gate; risk-coverage/AURC + OOD AUROC/FPR95; needs
-`train.collect_features`). Then Phase 10 Gradio demo.
-
-**PM25Vision paper (arXiv 2509.16519) baseline facts:** EfficientNet-B0 R²=0.550/MAE=36.6/RMSE=54.6
-on an **80/20 split** (= the shipped station-disjoint split). Paper gives NO target/loss/preproc/
-augmentation details — it's a plain RGB regressor, no physics, no calibration holdout. So our 0.16
-differs by (a) physics channels and (b) our own re-split. **EXPERIMENT 1 (set up now):** reproduce
-their baseline → `split.strategy: shipped` (test = their exact 2921 test rows; cal carved from their
-train) + `model.in_chans: 3` (RGB-only). Added `shipped` split strategy (uses `orig_split` from the
-DatasetDict) and RGB-only toggle. If this reproduces ~0.55, our pipeline is correct and 0.16 is just
-the honest harder split; if not, pipeline issue. Both toggles revert to 5-ch/station_grouped after.
+**C2 (error ceiling) BUILT + smoke-tested (2026-09-25).** `src/aqi.py` now has a parameterized
+breakpoint table (historical default + `PM25_BREAKPOINTS_2024`). `src/ceiling.py` upgraded:
+level-reweighted within-day noise curve v(m)→p(m) (`level_reweighted_var_epsilon`), split-specific
+Var(y), R²_max reported as an UPPER bound, empirical 5–95 percentile interval floor
+(`within_day_deviations`/`empirical_interval_floor`), min_hours=18, region-stratified OpenAQ sampling
+(`max_per_country`), station cluster-bootstrap CI (`bootstrap_r2max_ci`), and a one-call
+`compute_ceiling` that saves everything to `outputs/error_ceiling.json` (so `09_leakage` draws the
+ceiling line). `tests/smoke_ceiling.py` verifies it all incl. a hand-computed reweighting value
+(=175.0); 2024 breakpoints selectable + monotonic. `notebooks/07_error_ceiling.ipynb` + `docs/08_error_ceiling.md`
+updated and notebooks regenerated. **Next: user runs `07_error_ceiling` with a free OpenAQ key**
+(explore.openaq.org, no GPU) → paste R²_max + CI + the 2012/2024 band. Then **C3** (abstention:
+`src/abstain.py` + `notebooks/08_abstention.ipynb`) → Phase 10 Gradio demo.
 
 ## What this project is (30-second version)
 
 Predict PM2.5 **AQI (index 1–530, NOT µg/m³)** from a single street photo, *honestly*:
 calibrated low/median/high interval + refuse-to-answer + an unavoidable-error ceiling +
 leakage-safe evaluation. Implements the paper in `../ML_Paper_First_Update (1).pdf`.
-Dataset: `DeadCardassian/PM25Vision` (HF, 11,219 rows, 3,261 stations).
+Dataset: `DeadCardassian/PM25Vision` (HF, 11,096 rows after dedup, 3,259 stations).
 
 ## How the pieces fit
 
-- `src/` = the real logic (small, tested modules). `notebooks/` = per-phase Colab
-  notebooks that import `src/` and carry the beginner explanations. `docs/` = the same
-  explanations, standalone. `configs/default.yaml` = all settings. `tests/` = a 100-image
-  fixture + smoke tests so code is verified on a laptop before the full Colab run.
-- **Workflow:** Claude writes + smoke-tests code locally (CPU, fixture). User pushes to
-  GitHub, runs notebooks in Colab (GPU), pastes output back. **Full dataset always** for
-  real runs; the fixture is only Claude's local harness.
+- `src/` = the real logic (small, tested modules). `notebooks/` = per-phase notebooks that import
+  `src/` and carry the beginner explanations. `docs/` = the same explanations, standalone, plus
+  `RESULTS.md` (results ledger) and `CODE_WALKTHROUGH.md` (essential code). `configs/default.yaml` =
+  all settings. `tests/` = a 100-image fixture + smoke tests so code is verified on a laptop first.
+- **Workflow:** Claude writes + smoke-tests code locally (CPU, fixture). User pushes to GitHub, runs
+  notebooks on Kaggle (GPU) as **Save & Run All (Commit)** jobs (headless — survives closing the tab),
+  pastes output back. **Full dataset always** for real runs; the fixture is only Claude's local harness.
 
 ## Phase status
 
 | Phase | What | Status |
 |-------|------|--------|
-| 0 | Setup (repo, deps, Colab, Drive) | ✅ built + locally tested; awaiting user's first Colab run |
-| 1 | Data load + clean + audit (§3.2–3.3) | ✅ built + locally tested |
-| 2 | Leakage-safe splits (§3.4) | ✅ built + locally tested (4 strategies; grouped/geo verified 0-straddle) |
-| 3 | Physics features / 5-channel input (§3.5) | ✅ built + tested (`five_channel`, `build_map_cache` uint8, cache==on-the-fly) |
-| 4 | Model — EfficientNet-B0 + monotone quantiles (§3.6) | ✅ built + tested (5-ch stem, monotone by construction, pretrained load OK) |
-| 5 | Training — pinball loss, log target (§3.7, §3.12) | ✅ built + tested (CPU mini-run: losses/dataset/train chain) |
-| 6 | Conformal calibration + evaluation (§3.8, §3.11) | ✅ built + tested (conformal hits 0.90 on synthetic; full train→eval integration) — **core done** |
-| 5b | Accuracy upgrades (point head; class-balanced sampling; +epochs) | ✅ built + tested |
-| 5c | Stage A max-accuracy (standardized point head, cal-MAE early stop, drop_path) + Kaggle notebook | ✅ built + tested; awaiting Kaggle run |
-| 7 | C2 error ceiling via OpenAQ (§3.10) | ✅ built + math tested (needs user's free OpenAQ key to run) |
-| 8 | C3 abstention via ExDark/DTD/Indoor (§3.9) | TODO (after core) |
-| 9 | Ablations (§3.11) | TODO |
-| 10 | Frontend demo (Gradio) | TODO (needs trained model) |
+| 0 | Setup (repo, deps, Colab/Kaggle) | ✅ built + run |
+| 1 | Data load + clean + audit (§3.2–3.3) | ✅ built + run on full data |
+| 2 | Leakage-safe splits (§3.4) | ✅ built + run (5 strategies; grouped/geo/shipped verified 0-straddle) |
+| 3 | Physics features / 5-channel input (§3.5) | ✅ built + tested (cache verified aligned to image) |
+| 4 | Model — EfficientNet-B0 + monotone quantiles (§3.6) | ✅ built + tested (monotone by construction) |
+| 5 | Training — pinball + MSE point head, log-target quantiles (§3.7, §3.12) | ✅ built + tested |
+| 6 | Conformal calibration + evaluation (§3.8, §3.11) | ✅ built + tested (coverage ≈ 0.90) |
+| A | Leakage measurement (the "story") | ✅ **run + verified + documented** (Δ_leak=0.539) |
+| 7 / C2 | Error ceiling via OpenAQ (§3.10) | ✅ **built + smoke-tested**; needs user's free OpenAQ key to run (CPU) |
+| 8 / C3 | Abstention via ExDark/DTD/Indoor (§3.9) | ⏳ after C2 |
+| 9 | Ablations (§3.11) | ⏳ optional |
+| 10 | Frontend demo (Gradio) | ⏳ needs trained model |
 
 ## Key decisions
 
 - Label is AQI, not µg/m³ → report in AQI points; `src/aqi.py` converts only for C2.
-- Re-split the data ourselves (pool HF train+test). The shipped split is already
-  station-disjoint, so the "leaky" random control is one we construct (Phase 2).
-- Train on `log(AQI)`; calibrate/report in AQI units.
-- 5-channel input = RGB + DCP transmission + inverted saturation; physics maps cached.
-- Every notebook self-clones/install/mounts Drive (fixes `No module named 'src'`).
+- Re-split the data ourselves. The shipped split is already station-disjoint, so the "leaky" random
+  control is one we construct (Phase 2).
+- Point head trained with **MSE on a standardized target** (mean-seeking → good R²); intervals from
+  log-space monotone quantiles + conformal; isotonic recalibration on cal.
+- 5-channel input = RGB + DCP transmission + inverted saturation; physics maps cached (indexed by `_row`).
+- Every notebook self-clones/installs so `from src import ...` works standalone.
+- A bigger backbone can be trained later via `model.backbone` (config change + retrain); its result gets
+  a new row in `RESULTS.md` beside the B0 baseline.
 
 ## Known issues / open items
 
-- **Not yet run on real data in Colab** — need the user's Phase-0/1 output to confirm
-  real-dataset numbers (especially the falsification test's sign).
-- Demo hosting (temporary Colab link vs permanent HF Space) — decide at Phase 10.
-- OpenAQ API key (Phase 7) and Kaggle account for MIT Indoor (Phase 8) — needed later.
+- C2 needs a free **OpenAQ API key** (explore.openaq.org) to fetch hourly data — user provides at run.
+- C3 needs external image sets (ExDark, DTD, MIT-Indoor) — user downloads when we reach it.
+- Demo hosting (temporary Colab/Kaggle link vs permanent HF Space) — decide at Phase 10.
 
 ## Immediate next step
 
-Core is built. On the user's side: run the full Colab pipeline (03 cache → 05 train on GPU →
-06 evaluate) and paste numbers. On Claude's side: build **Phase 7 (C2 error ceiling via
-OpenAQ)**, **Phase 8 (C3 abstention via ExDark/DTD/Indoor)**, then **Phase 10 (Gradio demo)**.
-Write real Colab numbers into `docs/RESULTS.md` when they arrive.
+Build **C2 (error ceiling)**: upgrade `src/ceiling.py` + `src/aqi.py` (see "Next" above), smoke-test on
+synthetic hourly data, then hand off to the user to run with an OpenAQ key. Append the R²_max + sensitivity
+band to `docs/RESULTS.md` when it arrives.
 
 ## Test commands (laptop, no GPU)
 `python tests/_build_fixture.py` then `python tests/smoke_phase1.py` and `python tests/smoke_core.py`.

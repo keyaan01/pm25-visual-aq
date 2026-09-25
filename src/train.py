@@ -33,20 +33,6 @@ def _cosine_warmup(epoch: int, warmup: int, max_epochs: int) -> float:
     return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
 
 
-@torch.no_grad()
-def evaluate_loss(net, loader, quantiles, device, point_weight=1.0, huber_delta=1.0) -> float:
-    """Mean combined loss (pinball + Huber) over a loader (no gradients)."""
-    net.eval()
-    y_mean, y_std = float(net.y_mean), float(net.y_std)
-    total, n = 0.0, 0
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        loss = combined_loss(net(x), y, quantiles, point_weight, huber_delta, y_mean, y_std)
-        total += loss.item() * len(y)
-        n += len(y)
-    return total / max(1, n)
-
-
 def train_model(net, loaders, cfg, device, out_dir="outputs",
                 max_epochs=None, max_steps_per_epoch=None, verbose=True):
     """Train `net`; save the best checkpoint (lowest calibration loss). Returns history dict.
@@ -163,14 +149,6 @@ def target_stats(loader):
     """Mean/std of the raw AQI targets in a loader's dataset (for standardising the point head)."""
     y = np.asarray(loader.dataset.targets, dtype=float)
     return float(y.mean()), float(y.std() + 1e-6)
-
-
-@torch.no_grad()
-def collect_predictions(net, loader, device, log_target=True):
-    """Back-compat: return (quantiles_AQI (N,Q), targets_AQI (N,)) using the quantile heads."""
-    o = collect_outputs(net, loader, device)
-    q, y = o["q_log"], o["y_raw"]
-    return (np.exp(q), y) if log_target else (q, y)
 
 
 def load_checkpoint(path, net, map_location="cpu"):

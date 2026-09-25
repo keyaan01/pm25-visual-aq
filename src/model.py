@@ -48,13 +48,15 @@ class PM25QuantileNet(nn.Module):
 
     `forward` returns a dict:
       - "quantiles": (B, n) ascending quantile predictions (log-target space) — for intervals.
-      - "point":     (B,) a dedicated point estimate (log-target space) — for accuracy (R²/MAE),
-                     trained with Huber loss. Present only when `point_head=True`.
+      - "point":     (B,) a dedicated point estimate (standardised target space) — for accuracy
+                     (R²/MAE), trained with MSE. Present only when `point_head=True`.
 
     Why a separate point head? The median quantile minimises absolute error, which on a
     right-skewed target predicts low and hurts R² (R² rewards matching the conditional mean).
-    A Huber-trained point head (plus a smearing correction at eval) gives a much better point
-    estimate, while the quantile heads still provide the calibrated interval.
+    The point head is trained with **MSE on a standardised target** (z-score), so it estimates the
+    conditional mean; at inference we de-standardise linearly (`train.point_to_aqi`) and then apply
+    a monotone isotonic recalibration fit on the calibration set (`src/recalibrate.py`). The
+    quantile heads still provide the calibrated interval.
     """
 
     def __init__(

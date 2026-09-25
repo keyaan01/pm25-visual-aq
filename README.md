@@ -13,13 +13,29 @@ Calibrated Prediction Intervals and Inference-Time Abstention."* It is written f
 beginner: every phase has a notebook that explains what/why/how as it runs, mirrored
 by a plain-English write-up in [`docs/`](docs/).
 
+## Headline result — the leakage story
+
+The full results ledger is [`docs/RESULTS.md`](docs/RESULTS.md); the essential code behind it is
+walked through in [`docs/CODE_WALKTHROUGH.md`](docs/CODE_WALKTHROUGH.md); the plain-English story is
+[`docs/10_leakage.md`](docs/10_leakage.md).
+
+- **Honest accuracy** (station-grouped, leakage-safe): **R² = 0.220**, MAE 54.2 AQI, Spearman 0.65,
+  90% intervals ≈ calibrated (0.87).
+- **Measured leakage inflation:** a leaky *random* split scores **R² = 0.759** — above the benchmark's
+  reported 0.55, while **no station-disjoint split reaches 0.55**. **Δ_leak(R²) = 0.539.**
+- **Proof it's leakage** (not an easier test set): inside the random split, *contaminated* photos score
+  R² = 0.76 while *clean* (genuinely unseen) photos score **−0.86**.
+
+The deliverable is the honest number **plus** the measured, causally-demonstrated leakage gap — not
+matching a score that only leakage can produce.
+
 ## How it fits together
 
 | Folder | What's in it |
 |--------|--------------|
 | `src/` | Small reusable Python modules (the real logic), imported by the notebooks. |
 | `notebooks/` | One Colab notebook per phase — this is where you run things and read the explanations. |
-| `docs/` | The same explanations as standalone Markdown you can read without running anything. |
+| `docs/` | Standalone Markdown you can read without running anything — including [`RESULTS.md`](docs/RESULTS.md) (results ledger) and [`CODE_WALKTHROUGH.md`](docs/CODE_WALKTHROUGH.md) (the essential code, explained). |
 | `configs/default.yaml` | Every hyperparameter in one place. |
 | `tests/` | A tiny fixture + smoke-tests so the code can be checked on a laptop (no GPU). |
 | `data/`, `outputs/` | Created at run time (git-ignored). |
@@ -35,16 +51,19 @@ by a plain-English write-up in [`docs/`](docs/).
 | 4 | `04_model` | 3.6 | EfficientNet-B0 with monotone quantile heads. |
 | 5 | `05_train` | 3.7, 3.12 | Train with pinball loss on log(AQI). |
 | 6 | `06_calibrate_evaluate` | 3.8, 3.11 | Conformal calibration + metrics. **← core pipeline done** |
+| A | `09_leakage` | 3.4 | **Leakage measurement** — the split gradient + contaminated-vs-clean proof. ✅ |
 | 7 | `07_error_ceiling` | 3.10 | C2: unavoidable-error ceiling from OpenAQ hourly data. |
 | 8 | `08_abstention` | 3.9 | C3: refuse to answer on unusable inputs. |
 | 9 | `09_ablations` | 3.11 | Ablations + write-up. |
 
 ## Running it
 
-You need a (free) Google account for [Colab](https://colab.research.google.com) —
-that is where the free GPU is. Start with **`notebooks/00_setup.ipynb`** and follow
-it top to bottom; it explains Colab, GitHub, and Google Drive as it goes. Then work
-through the notebooks in order.
+You need a free cloud GPU. This project runs on **[Kaggle Notebooks](https://www.kaggle.com/code)**
+(free T4, ~30 h/week) — set Accelerator = GPU T4 and Internet = On, paste your repo URL in the first
+cell, and for anything longer than ~30 min use **Save Version → Save & Run All (Commit)** so it runs
+headless (it survives you closing the tab). The per-phase notebooks also run on
+[Colab](https://colab.research.google.com) when its GPU is available. Start with
+**`notebooks/00_setup.ipynb`** and work through them in order.
 
 To check the code on a normal laptop (no GPU, no big download):
 

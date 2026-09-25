@@ -18,9 +18,8 @@ multiply -- you find which band a value falls in and apply that band's formula.
 from __future__ import annotations
 
 # Official EPA PM2.5 (24-hour) breakpoints:  (C_low, C_high, AQI_low, AQI_high)
-# Concentrations in ug/m3. This is the long-standing table WAQI used to build the
-# PM25Vision labels over 2014-2025. (EPA revised the lowest bands in 2024; we keep
-# the historical table to match how the dataset's labels were produced.)
+# Concentrations in ug/m3. This is the long-standing (pre-2024) table WAQI used to build the
+# PM25Vision labels over 2014-2025, so it is our DEFAULT — it matches how the labels were produced.
 PM25_BREAKPOINTS = [
     (0.0, 12.0, 0, 50),
     (12.1, 35.4, 51, 100),
@@ -31,36 +30,49 @@ PM25_BREAKPOINTS = [
     (350.5, 500.4, 401, 500),
 ]
 
+# EPA's revised PM2.5 AQI breakpoints, effective 2024-05-06 (lower thresholds for the cleaner and
+# the most-hazardous bands). We keep it as an OPTION so C2 can report a sensitivity band across the
+# 2012 vs 2024 conventions; it is NOT the default because the dataset's labels predate it.
+PM25_BREAKPOINTS_2024 = [
+    (0.0, 9.0, 0, 50),
+    (9.1, 35.4, 51, 100),
+    (35.5, 55.4, 101, 150),
+    (55.5, 125.4, 151, 200),
+    (125.5, 225.4, 201, 300),
+    (225.5, 325.4, 301, 500),
+]
 
-def pm25_to_aqi(conc: float) -> float:
+
+def pm25_to_aqi(conc: float, table=PM25_BREAKPOINTS) -> float:
     """Convert a PM2.5 concentration (ug/m3) to an AQI index value.
 
-    Values above the top breakpoint are linearly extrapolated from the last band
-    (the dataset contains AQI values up to 530, i.e. slightly beyond the standard
-    500 ceiling), so we do not clamp.
+    `table` selects the breakpoint convention (default = the historical table that produced the
+    PM25Vision labels; pass `PM25_BREAKPOINTS_2024` for the 2024 revision). Values above the top
+    breakpoint are linearly extrapolated from the last band (the dataset contains AQI up to ~530,
+    slightly beyond the standard 500 ceiling), so we do not clamp.
     """
     if conc is None or conc < 0:
         return float("nan")
-    for c_lo, c_hi, a_lo, a_hi in PM25_BREAKPOINTS:
+    for c_lo, c_hi, a_lo, a_hi in table:
         if conc <= c_hi:
             return (a_hi - a_lo) / (c_hi - c_lo) * (conc - c_lo) + a_lo
     # above the table: extrapolate using the slope of the last band
-    c_lo, c_hi, a_lo, a_hi = PM25_BREAKPOINTS[-1]
+    c_lo, c_hi, a_lo, a_hi = table[-1]
     return (a_hi - a_lo) / (c_hi - c_lo) * (conc - c_lo) + a_lo
 
 
-def aqi_to_pm25(aqi: float) -> float:
+def aqi_to_pm25(aqi: float, table=PM25_BREAKPOINTS) -> float:
     """Convert an AQI index value back to an estimated PM2.5 concentration (ug/m3).
 
-    Inverse of `pm25_to_aqi`. Useful if we ever want concentrations; note it
-    introduces distortion near band boundaries (mentioned in the guide).
+    Inverse of `pm25_to_aqi` (same `table` convention). Useful if we ever want concentrations; note
+    it introduces distortion near band boundaries (mentioned in the guide).
     """
     if aqi is None or aqi < 0:
         return float("nan")
-    for c_lo, c_hi, a_lo, a_hi in PM25_BREAKPOINTS:
+    for c_lo, c_hi, a_lo, a_hi in table:
         if aqi <= a_hi:
             return (c_hi - c_lo) / (a_hi - a_lo) * (aqi - a_lo) + c_lo
-    c_lo, c_hi, a_lo, a_hi = PM25_BREAKPOINTS[-1]
+    c_lo, c_hi, a_lo, a_hi = table[-1]
     return (c_hi - c_lo) / (a_hi - a_lo) * (aqi - a_lo) + c_lo
 
 
