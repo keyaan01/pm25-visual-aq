@@ -98,6 +98,19 @@ def test_bootstrap_and_compute():
     print(f"[ceiling] bootstrap CI [{ci['R2_max_lo']:.3f},{ci['R2_max_hi']:.3f}] + compute_ceiling OK")
 
 
+def test_nan_readings_dropped():
+    hourly = _synthetic_hourly(n_hours=20)
+    junk = pd.DataFrame([{"location_id": "A", "datetime": "2024-01-01T05:00:00Z", "pm25_ugm3": -5.0},
+                         {"location_id": "B", "datetime": "2024-01-01T06:00:00Z", "pm25_ugm3": None}])
+    hourly = pd.concat([hourly, junk], ignore_index=True)      # invalid readings must NOT poison stats
+    var_eps, per_day = Cg.within_day_aqi_variance(hourly, min_hours=18)
+    assert np.isfinite(var_eps) and per_day["within_day_var"].notna().all()
+    devs = Cg.within_day_deviations(hourly, min_hours=18)
+    floor = Cg.empirical_interval_floor(devs)
+    assert np.isfinite(devs).all() and np.isfinite(floor) and floor > 0
+    print("[ceiling] invalid/NaN readings dropped -> finite var + finite floor OK")
+
+
 def test_empty_data_clean_error():
     empty = pd.DataFrame(columns=["location_id", "datetime", "pm25_ugm3"])
     _, per_day = Cg.within_day_aqi_variance(empty, min_hours=18)
@@ -117,5 +130,6 @@ if __name__ == "__main__":
     test_level_reweighting_handcomputed()
     test_error_ceiling_and_floor()
     test_bootstrap_and_compute()
+    test_nan_readings_dropped()
     test_empty_data_clean_error()
     print("\nALL C2 CEILING SMOKE CHECKS PASSED")

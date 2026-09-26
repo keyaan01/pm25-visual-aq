@@ -16,6 +16,7 @@ Each module maps to a phase of the project (and a section of the paper):
     metrics      MAE / RMSE / R2 / coverage / width               (paper Sec 3.11)
     ceiling      C2 unavoidable-error ceiling (OpenAQ)             (paper Sec 3.10)
     leakage      the leakage-gradient experiment (the "story")    (paper Sec 3.4)
+    crossval     leakage-safe grouped K-fold cross-validation     (paper Sec 3.11)
     config       load configs/default.yaml
 """
 
@@ -34,5 +35,6 @@ __all__ = [
     "metrics",
     "ceiling",
     "leakage",
+    "crossval",
     "config",
 ]

@@ -32,17 +32,20 @@ from . import train as T
 
 
 def train_and_evaluate(ds, df, cache, cfg, strategy, device, out_root, seed=None,
-                       max_epochs=None, num_workers=2, verbose=False):
-    """Train on one split strategy and evaluate; return metrics + per-test-row predictions.
+                       max_epochs=None, num_workers=2, verbose=False, sp=None):
+    """Train on one split and evaluate; return metrics + per-test-row predictions.
 
-    Everything except `strategy` is held constant (same cfg, same seed, same cache) so the
-    comparison across splits is apples-to-apples.
+    Everything except the split is held constant (same cfg, same seed, same cache) so comparisons
+    are apples-to-apples. `strategy` names the split (and the checkpoint sub-dir). Pass a pre-built
+    `sp` (a df with a 'split' column) to evaluate an arbitrary split — e.g. a cross-validation fold;
+    otherwise the split is built by `make_splits(strategy)`.
     """
     seed = seed if seed is not None else cfg["seed"]
     T.set_seed(seed)
-    sp = S.make_splits(df, strategy=strategy, seed=seed,
-                       station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
-                       lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
+    if sp is None:
+        sp = S.make_splits(df, strategy=strategy, seed=seed,
+                           station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
+                           lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
     loaders = D.make_dataloaders(ds, sp, cache, cfg, num_workers=num_workers)
     net = M.build_model(cfg).to(device)
     out_dir = os.path.join(out_root, strategy)

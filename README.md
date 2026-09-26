@@ -52,6 +52,7 @@ matching a score that only leakage can produce.
 | 5 | `05_train` | 3.7, 3.12 | Train with pinball loss on log(AQI). |
 | 6 | `06_calibrate_evaluate` | 3.8, 3.11 | Conformal calibration + metrics. **← core pipeline done** |
 | A | `09_leakage` | 3.4 | **Leakage measurement** — the split gradient + contaminated-vs-clean proof. ✅ |
+| CV | `10_crossval` | 3.11 | Leakage-safe 5-fold (GroupKFold by station) → R² mean ± CI. |
 | 7 | `07_error_ceiling` | 3.10 | C2: unavoidable-error ceiling from OpenAQ hourly data. |
 | 8 | `08_abstention` | 3.9 | C3: refuse to answer on unusable inputs. |
 | 9 | `09_ablations` | 3.11 | Ablations + write-up. |

@@ -88,7 +88,8 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,096 rows after dedup, 3,259 station
 | 5 | Training — pinball + MSE point head, log-target quantiles (§3.7, §3.12) | ✅ built + tested |
 | 6 | Conformal calibration + evaluation (§3.8, §3.11) | ✅ built + tested (coverage ≈ 0.90) |
 | A | Leakage measurement (the "story") | ✅ **run + verified + documented** (Δ_leak=0.539) |
-| 7 / C2 | Error ceiling via OpenAQ (§3.10) | ✅ **built + smoke-tested**; needs user's free OpenAQ key to run (CPU) |
+| 7 / C2 | Error ceiling via OpenAQ (§3.10) | ✅ built + **first run in** (R²_max≈0.977, upper bound); cleaned (NaN drop + broader sample) → user re-runs 07 for clean floor/v(m) |
+| CV | Leakage-safe 5-fold cross-validation (§3.11) | ✅ **built + smoke-tested** (`src/crossval.py`, `10_crossval.ipynb`, GroupKFold by station); user runs once (~5–6h GPU) |
 | 8 / C3 | Abstention via ExDark/DTD/Indoor (§3.9) | ⏳ after C2 |
 | 9 | Ablations (§3.11) | ⏳ optional |
 | 10 | Frontend demo (Gradio) | ⏳ needs trained model |

@@ -711,17 +711,17 @@ assert OPENAQ_API_KEY != "PASTE_YOUR_OPENAQ_KEY_HERE", "Add your OpenAQ API key 
 
     ("md", """## Fetch hourly PM2.5 from a region-stratified sample of stations
 
-We pull ~40 stations' hourly readings over a recent 45-day window, **capping stations per country**
-so the sample spreads across regions (not dominated by whichever country OpenAQ lists first). Exact
-matching to PM25Vision's stations isn't needed — we want a defensible estimate of the within-day AQI
-variance *curve*."""),
+We pull ~80 stations' hourly readings over a recent 60-day window, **capping stations per country**
+so the sample spreads across regions (not dominated by whichever country OpenAQ lists first) and
+covers a range of pollution levels. Exact matching to PM25Vision's stations isn't needed — we want a
+defensible estimate of the within-day AQI variance *curve* across levels."""),
     ("code", """import datetime as dt
 from src import ceiling as CE
 to = dt.date.today()
-frm = to - dt.timedelta(days=45)
+frm = to - dt.timedelta(days=60)
 hourly = CE.fetch_openaq_hourly(OPENAQ_API_KEY,
                                 date_from=frm.isoformat(), date_to=to.isoformat(),
-                                n_locations=40, max_per_country=6)
+                                n_locations=80, max_per_country=10)
 print("hourly rows fetched:", len(hourly), "| stations:", hourly["location_id"].nunique(),
       "| countries:", hourly["country"].nunique())
 hourly.head()"""),
@@ -754,7 +754,9 @@ print("R2_max (UPPER bound, label noise only): %.3f  [95%% CI %.3f - %.3f]"
       % (res["R2_max"], res["R2_max_lo"], res["R2_max_hi"]))
 print("honest R2 we measured (station-grouped): 0.220   |   published baseline: 0.550")
 print("honest interval-width floor: ~%.1f AQI (a 90%% range narrower than this over-claims)" % res["interval_width_floor"])
-print("based on %d station-days from %d stations" % (res["n_station_days"], res["n_stations"]))"""),
+print("based on %d station-days from %d stations" % (res["n_station_days"], res["n_stations"]))
+print("noise curve covers %.0f%% of the dataset's label mass (rest is high-AQI extrapolation -> R2_max is a looser upper bound)"
+      % (100 * res["p_mass_covered"]))"""),
 
     ("md", "### The within-day noise curve v(m) + a 2012-vs-2024 breakpoint sensitivity check"),
     ("code", """import pandas as pd
@@ -1056,6 +1058,69 @@ This is your paper's headline: the honest number, the leaky number, and *proof* 
 Save Version to keep the checkpoints + `leakage_gradient.csv`."""),
 ]
 
+# ===========================================================================
+# 10_crossval.ipynb  (leakage-safe grouped K-fold cross-validation)
+# ===========================================================================
+CROSSVAL = [
+    ("md", """# Cross-validation — how robust is the honest R²?
+
+A single train/test split gives ONE number; it could be lucky or unlucky. **Leakage-safe 5-fold
+cross-validation** trains the model on 5 different **station-disjoint** folds (GroupKFold on
+`station_id`, so a station is never in its own fold's training data) and reports R²/MAE/coverage as a
+**mean ± 95% CI**. This turns "R²=0.22" into "R²=0.22 ± CI" — the robustness check a reviewer expects.
+
+> ⏳ This trains 5 models in one go (~5–6 h on a T4). Run it as **Save & Run All (Commit)** and walk
+> away. To go faster, set `N_SPLITS = 3` below (~3 h)."""),
+
+    ("md", BOOTSTRAP_MD),
+    ("code", KAGGLE_BOOTSTRAP),
+
+    ("code", """import os, json, numpy as np, pandas as pd
+from src.config import load_config
+from src import data, physics, crossval
+cfg = load_config()
+device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+WORK = "/kaggle/working"
+cache_path = os.path.join(WORK, "pm25_cache", "physics_maps_%d.npy" % cfg["data"]["image_size"])
+out_root = os.path.join(WORK, "pm25_outputs"); os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+
+ds, df = data.load_clean(cfg["data"]["hf_repo"], from_disk=False, seed=cfg["seed"])
+print("rows:", len(df))
+if not os.path.exists(cache_path):
+    physics.build_map_cache(len(ds), lambda i: data.get_image(ds, i), cache_path,
+        size=cfg["data"]["image_size"], patch=cfg["physics"]["dcp_patch"],
+        omega=cfg["physics"]["dcp_omega"], top_frac=cfg["physics"]["atmos_top_frac"], t_min=cfg["physics"]["t_min"])
+cache = physics.load_map_cache(cache_path)"""),
+
+    ("md", """## Run leakage-safe grouped cross-validation
+
+Same model + config as the honest single-split run — only the fold assignment changes. Every fold is
+station-disjoint (its `straddling` column must be 0)."""),
+    ("code", """N_SPLITS = 5   # set to 3 for a ~3 h run
+reports, summary = crossval.run_cv(ds, df, cache, cfg, device, out_root, n_splits=N_SPLITS, verbose=False)
+
+cols = ["fold","R2","r2_pearson","MAE","RMSE","Spearman","coverage","SD_y_test","n_train","n_test","straddling_stations"]
+per_fold = pd.DataFrame(reports)[cols].round(3)
+per_fold.to_csv(os.path.join(out_root, "cv_folds.csv"), index=False)
+json.dump(summary, open(os.path.join(out_root, "cv_summary.json"), "w"), indent=2, default=float)
+per_fold"""),
+
+    ("md", "## The headline: mean ± 95% CI across folds"),
+    ("code", """for k in ["R2","MAE","RMSE","Spearman","coverage"]:
+    s = summary[k]
+    print("%-9s mean=%.3f  std=%.3f  95%% CI [%.3f, %.3f]  (n=%d folds)"
+          % (k, s["mean"], s["std"], s["ci_lo"], s["ci_hi"], s["n"]))
+print()
+sr = summary["R2"]
+print("Report as: honest R2 = %.3f +/- %.3f  (95%% CI [%.3f, %.3f]) across %d station-disjoint folds"
+      % (sr["mean"], sr["mean"]-sr["ci_lo"], sr["ci_lo"], sr["ci_hi"], sr["n"]))"""),
+
+    ("md", """## Done — paste me the per-fold table + the mean ± CI line
+
+This turns the single-split 0.22 into a robust interval across station-disjoint folds. Save Version
+to keep `cv_folds.csv` + `cv_summary.json`."""),
+]
+
 if __name__ == "__main__":
     build("00_setup.ipynb", SETUP)
     build("01_data_audit.ipynb", AUDIT)
@@ -1067,3 +1132,4 @@ if __name__ == "__main__":
     build("07_error_ceiling.ipynb", CEILING)
     build("kaggle_pipeline.ipynb", KAGGLE)
     build("09_leakage.ipynb", LEAKAGE)
+    build("10_crossval.ipynb", CROSSVAL)

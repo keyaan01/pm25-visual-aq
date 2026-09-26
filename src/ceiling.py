@@ -52,6 +52,23 @@ PM25_PARAMETER_ID = 2   # OpenAQ's parameter id for PM2.5
 AQI_BAND_EDGES = (0, 50, 100, 150, 200, 300, 10_000)
 
 
+def _clean_hourly_aqi(hourly, ugm3_col, time_col, table):
+    """Return the hourly frame with a finite `aqi` column and a `date` column.
+
+    OpenAQ occasionally returns negative or missing values; those convert to a non-finite AQI and
+    would poison the within-day variance / deviations (a single NaN makes the whole day's variance
+    NaN and the pooled percentile floor NaN). We drop them here, once, so every downstream group has
+    only valid readings and `min_hours` counts VALID hours.
+    """
+    df = hourly.copy()
+    conc = pd.to_numeric(df[ugm3_col], errors="coerce")
+    df["aqi"] = [pm25_to_aqi(c, table) if (c is not None and np.isfinite(c)) else float("nan")
+                 for c in conc]
+    df["date"] = pd.to_datetime(df[time_col], errors="coerce").dt.date
+    keep = np.isfinite(pd.to_numeric(df["aqi"], errors="coerce")) & df["date"].notna()
+    return df[keep].copy()
+
+
 # ---------------------------------------------------------------------------
 # the math (independently testable — no network needed)
 # ---------------------------------------------------------------------------
@@ -68,9 +85,7 @@ def within_day_aqi_variance(hourly, station_col="location_id", time_col="datetim
 
     per_day columns: station, date, n_hours, day_mean_aqi, within_day_var.
     """
-    df = hourly.copy()
-    df["aqi"] = df[ugm3_col].astype(float).map(lambda c: pm25_to_aqi(c, table))
-    df["date"] = pd.to_datetime(df[time_col]).dt.date
+    df = _clean_hourly_aqi(hourly, ugm3_col, time_col, table)   # drop invalid/NaN readings first
     rows = []
     for (stn, day), g in df.groupby([station_col, "date"]):
         if len(g) < min_hours:
@@ -90,9 +105,7 @@ def within_day_deviations(hourly, station_col="location_id", time_col="datetime"
     Used for the EMPIRICAL interval floor: the honest 90% band cannot be narrower than the actual
     5-95 percentile spread of within-day AQI (this replaces the Gaussian sigma assumption).
     """
-    df = hourly.copy()
-    df["aqi"] = df[ugm3_col].astype(float).map(lambda c: pm25_to_aqi(c, table))
-    df["date"] = pd.to_datetime(df[time_col]).dt.date
+    df = _clean_hourly_aqi(hourly, ugm3_col, time_col, table)   # drop invalid/NaN readings first
     devs = []
     for (_stn, _day), g in df.groupby([station_col, "date"]):
         if len(g) < min_hours:
@@ -241,6 +254,11 @@ def compute_ceiling(hourly, dataset_labels, var_labels, station_col="location_id
     out["n_stations"] = int(per_day["station"].nunique()) if len(per_day) else 0
     out["min_hours"] = int(min_hours)
     out["curve"] = curve.to_dict(orient="records")
+    # How much of the dataset's label distribution the noise curve actually covers. If < ~1.0, the
+    # high-AQI bands (largest within-day swings) are under-sampled, so R2_max is a LOOSER upper bound.
+    p = _label_hist(dataset_labels, edges)
+    covered = set(int(b) for b in curve.loc[curve["v"].notna(), "band_idx"]) if len(curve) else set()
+    out["p_mass_covered"] = float(sum(p[b] for b in range(len(p)) if b in covered))
     return out
 
 
@@ -253,7 +271,7 @@ def _get(url, api_key, params=None, timeout=60):
     return r.json()
 
 
-def find_pm25_sensors(api_key, n_locations=60, page_limit=100, max_pages=8, max_per_country=6):
+def find_pm25_sensors(api_key, n_locations=80, page_limit=100, max_pages=15, max_per_country=10):
     """Return a list of (location_id, sensor_id, country) for PM2.5 sensors worldwide.
 
     `max_per_country` caps how many stations come from any one country, so the sample is spread
@@ -294,8 +312,8 @@ def fetch_sensor_hours(api_key, sensor_id, date_from, date_to, limit=1000):
     return out
 
 
-def fetch_openaq_hourly(api_key, date_from, date_to, n_locations=40, pause=0.2,
-                        max_per_country=6) -> pd.DataFrame:
+def fetch_openaq_hourly(api_key, date_from, date_to, n_locations=80, pause=0.2,
+                        max_per_country=10) -> pd.DataFrame:
     """Collect hourly PM2.5 (ug/m3) for a region-stratified sample of stations. Tidy DataFrame.
 
     Columns: location_id, country, datetime, pm25_ugm3. Feed this to `compute_ceiling` /
