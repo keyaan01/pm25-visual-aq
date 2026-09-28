@@ -205,19 +205,19 @@ Because each label is a **daily average** but each photo is an **instant**, even
 would disagree with the label by the day's within-day swing. That puts a hard **upper bound** on
 achievable R²: `R²_max = 1 − Var(ε)/Var(y)`, where Var(ε) is the within-day noise.
 
-**The result: report it as a RANGE ≈ 0.90–0.95 (do not quote "0.977").** The first pass computed 0.977,
-but our audit showed that is a **loose, optimistic** figure, for three reasons that all push it *up*:
-1. the reference sample was tiny (~13 stations) and **under-covered high-pollution conditions**, where
-   the within-day swing is largest — and those bands were dropped;
-2. hourly readings are themselves 1-hour averages, so they **smooth** sub-hourly swings;
-3. the ceiling is **split-specific** (it scales with the test set's spread), so one global number
-   misleads.
+**The result: R²_max ≈ 0.98** — measured on 32 OpenAQ stations across 6 countries (1,241 station-days):
+0.982 (optimistic) to **0.979** (conservative, imputing the still-uncovered top bands), and ~0.98 under
+both the 2012 and 2024 EPA breakpoint tables. Report it as **~0.98, an upper bound** — not a single
+decimal, and not with a tight confidence interval (the cluster-bootstrap band [0.970, 0.993] comes from
+only 32 stations). An earlier 13-station pass gave a looser 0.977, and we worried the true value might
+fall to ~0.90–0.95 once the most-polluted bands were covered — the better-sampled re-run shows it does
+**not**: even imputing the uncovered top ~13% (200+ AQI) with a high within-day variance, the ceiling
+only moves to 0.979.
 
-**What it means for the project — and this survives every caveat:** label noise is **small** relative to
-the spread of the labels. So our honest 0.22–0.39 is limited by **how hard it is to read pollution from
-one photo**, not by noisy labels. The ceiling's *job* was to tell us "is the gap difficulty or bad
-labels?" — and the answer is **difficulty**. (The code now also reports a *conservative* ceiling and
-flags when coverage is incomplete; a high-pollution-targeted re-run will tighten the range.)
+**What it means for the project:** label noise is only **~2% of the label variance** (Var(ε) ≈ 208–248 vs
+Var(y) ≈ 11,708). So daily-average labeling costs at most ~2 points of R², and our honest 0.22–0.39 is
+limited by **how hard it is to read pollution from one photo**, not by noisy labels. The ceiling's *job*
+was to answer "is the gap difficulty or bad labels?" — and the answer is emphatically **difficulty**.
 
 ---
 
@@ -231,7 +231,8 @@ re-read every module and re-check the math. Combined verdict:
   Predictions line up with the right photos and labels; splits are station-disjoint by construction;
   the coverage guarantee is implemented correctly; the point head genuinely targets the mean; and every
   table row reconciles with the identity R² ≈ 1 − (RMSE/SD)².
-- **The one over-statement was C2** (the 0.977 ceiling), now reframed as a range (Section 7).
+- **The one over-statement was the first-run C2** (a loose 0.977 from 13 stations); the proper re-run
+  gives R²_max ≈ 0.98 (Section 7).
 - Everything else was reporting polish, now applied (leading with the MAE gap, flagging the −0.86 as
   variance-amplified, disambiguating the confidence interval, noting the correlated-fold caveat), plus
   defensive safety checks and tests added to the code.
@@ -251,19 +252,24 @@ re-read every module and re-check the math. Combined verdict:
   unspecified and *admits* leakage.)
 - ✗ "Clean photos give R² = −0.86, so the model is broken." (That −0.86 is variance-amplified; the MAE
   gap is modest.)
-- ✗ "The ceiling is 0.977." (It is a loose upper bound; report ≈0.90–0.95.)
+- ✗ "The ceiling is exactly 0.98 / 0.977." (It is an upper bound ~0.98 with the top ~13% extrapolated;
+  report it as ~0.98, not a single decimal, and not with a tight CI.)
 - ✗ "R² alone tells the story." (Always read it beside MAE and the test-set spread.)
 
 ---
 
 ## 10. What still needs running (short list)
 
-1. **`07_error_ceiling.ipynb`** on Kaggle (Internet on, **no GPU**, ~15 min) — needs a free OpenAQ API
-   key. Produces the clean, honest ceiling range. *This is the one worth doing.*
-2. **(Optional) `10_crossval.ipynb` with `ACCURACY_PUSH = True`** — turns on an ensemble + EMA + TTA to
-   try to raise R² (~15 h on a GPU). Reported as a *new row* beside the honest baseline, never replacing
-   it. Skip unless you specifically want a higher number.
-3. **(Later)** the abstention notebook (C3) and the demo — not built yet.
+Done: core pipeline, leakage, cross-validation, and the **C2 error ceiling** (≈0.98, Section 7). C3
+abstention and the demo are **built and locally tested** — they just need one run each:
+
+1. **`08_abstention.ipynb`** on Kaggle — attach ExDark (night) / DTD (textures) / MIT-Indoor (indoor),
+   run it (uses the trained model, no retrain). Produces the risk–coverage/AURC + OOD tables and saves
+   the demo bundle. *This is the one worth doing next.*
+2. **Deploy the demo** — download the bundle, then follow `docs/11_demo.md` to create the free Hugging
+   Face Space (Gradio) and go live at a permanent URL.
+3. **(Optional) `10_crossval.ipynb` with `ACCURACY_PUSH = True`** — ensemble + EMA + TTA to try to raise
+   R² (~15 h on a GPU); reported as a *new row* beside the baseline. Skip unless you want a higher number.
 
 ---
 
@@ -278,4 +284,4 @@ re-read every module and re-check the math. Combined verdict:
 - **Conformal calibration** — the procedure that guarantees ~90% interval coverage for any model.
 - **Δ_leak** — how much a leaky split inflates the score over the honest one.
 - **R²_max (error ceiling)** — the best R² any model could reach given the daily-average labels (an
-  *upper bound*, honest range ≈0.90–0.95).
+  *upper bound*, measured ≈0.98).

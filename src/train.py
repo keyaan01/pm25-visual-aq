@@ -163,6 +163,23 @@ def collect_outputs(net, loader, device, tta=False):
             "y_raw": np.concatenate(ys)}
 
 
+@torch.no_grad()
+def collect_features(net, loader, device):
+    """Backbone POOLED features for every item in a loader (order matches the loader; shuffle=False).
+
+    Returns {"feats": (N, D), "y_raw": (N,)}. `collect_outputs` returns predictions; this returns the
+    penultimate features `net.backbone(x)` instead — needed by the abstention OOD gate, which fits a
+    feature-space detector on calibration good-images and scores test / out-of-distribution images.
+    """
+    net.eval()
+    fs, ys = [], []
+    for x, y in loader:
+        feats = net.backbone(x.to(device))
+        fs.append(feats.cpu().numpy())
+        ys.append(y.numpy())
+    return {"feats": np.concatenate(fs), "y_raw": np.concatenate(ys)}
+
+
 def point_to_aqi(point_out, y_mean, y_std):
     """De-standardise the point head's z-score output back to AQI (clip at 0)."""
     return np.maximum(np.asarray(point_out) * y_std + y_mean, 0.0)

@@ -554,11 +554,11 @@ pollution swings during the day. So even a *perfect* photo-reader would differ f
 an error baked into the labels that no model can remove.
 
 🎓 We estimate the best possible R²: **R²_max = 1 − Var(ε)/Var(y)**, where **ε** is the within-day
-deviation (instant minus daily-average) and Var(y) is the spread of the labels. First pass:
-**R²_max ≈ 0.977**, but treat that as the *optimistic end of a range* — the honest range is roughly
-**0.90–0.95** (see the honesty note). We get Var(ε) from **OpenAQ** hourly reference data (converted
-per-hour to AQI) and **reweight** it to our dataset's own pollution mix; Var(y) is the **specific** test
-split's spread (SD ≈ 108 AQI), so the ceiling is *split-specific*.
+deviation (instant minus daily-average) and Var(y) is the spread of the labels. Measured on 32 OpenAQ
+stations across 6 countries (1,241 station-days): **R²_max ≈ 0.98** (0.982 optimistic to 0.979
+conservative, and ~0.98 under both the 2012 and 2024 EPA tables). We get Var(ε) from **OpenAQ** hourly
+reference data (converted per-hour to AQI) and **reweight** it to our dataset's own pollution mix;
+Var(y) is the **specific** test split's spread (SD ≈ 108 AQI), so the ceiling is *split-specific*.
 
 🧑‍🏫 **The crucial framing: R²_max is an UPPER bound, for *label noise only*.** A real model *also* loses
 to limited visual signal, imbalance, and domain shift, so our honest 0.22 (0.385 cross-validated) can
@@ -568,13 +568,13 @@ limited by the difficulty of the task, not by noisy labels.**" *(A tempting over
 split scoring above R²_max proves leakage." That only works if you use that split's OWN Var(y) — the
 ceiling is split-specific — so we prove leakage with the causal test, not a ceiling overlay.)*
 
-*(Be honest about its weakness — this is exactly the kind of self-audit the professor will reward.
-The first run used only ~13 stations that under-covered the most-polluted bands, where within-day
-swings are largest; dropping those bands makes Var(ε) look too small, so **0.977 is a loose,
-optimistic** figure — don't quote it as "0.977 with a tight CI." Hourly data also smooths sub-hourly
-swings, biasing it up again. The honest number is the **range 0.90–0.98**; the code now also reports a
-conservative estimate and flags when coverage is incomplete, and a high-AQI-targeted re-run tightens it.
-The point that survives regardless: label noise is small, so our score is task-limited, not label-limited.)*
+*(Be honest about the sampling — this is exactly the kind of self-audit the professor will reward. The
+first pass used only ~13 stations and gave a loose 0.977; we worried the true ceiling might drop to
+~0.90–0.95 once the most-polluted bands were covered. The proper re-run (32 stations, 6 countries)
+shows it does **not** — even imputing the still-uncovered top ~13% (200+ AQI) with a high within-day
+variance, the ceiling only moves from 0.982 to **0.979**. So report ~0.98, not a single decimal, and
+keep the caveat that the very top bands are extrapolated. The point that survives regardless: label
+noise is only ~2% of the label variance, so our score is **task-limited, not label-limited**.)*
 
 ## 16. Was 0.22 just an unlucky split? — cross-validation (the result that *raised* our number)
 
@@ -654,8 +654,8 @@ if any were miscalculated.
 5. **The honest machine (60s).** Physics-guided 5-channel input, EfficientNet-B0, a mean-seeking point
    head for accuracy, and conformal-calibrated intervals for honesty (~87–90% coverage).
 6. **Bulletproofing (30s).** Leakage-safe cross-validation gives **0.385 ± 0.19** with validated
-   interval coverage (0.895); an error ceiling (an upper bound, honest range ≈0.90–0.95) shows the score
-   is task-limited, not label-limited; and two independent 3-agent audits found no result-affecting bug.
+   interval coverage (0.895); an error ceiling (an upper bound ≈0.98, measured on 32 stations) shows the
+   score is task-limited, not label-limited; and two independent 3-agent audits found no result-affecting bug.
 7. **Contribution (20s).** An honest number **plus** a measured, causally-proven flaw in how these
    benchmarks are usually scored.
 
@@ -726,11 +726,12 @@ if any were miscalculated.
 - **Q: What is the error ceiling and why an upper bound?** → **The best R² possible given label noise:**
   labels are daily averages, photos are instants, so a perfect reader still misses by the within-day
   swing. It's an upper bound because it counts label noise only; real models also lose to weak signal.
-- **Q: (Trap) Is R²_max ≈ 0.977 trustworthy?** → **No — it's a loose, optimistic upper bound; report it
-  as a range (~0.90–0.95), not "0.977 with a tight CI".** A thin ~13-station sample under-covered the
-  high-AQI bands (biggest swings) and hourly data smooths sub-hourly variation — both push it *up*. The
-  code now also gives a conservative estimate + a coverage flag, and a high-AQI-targeted re-run tightens
-  it. What survives regardless: label noise is small, so our score is task-limited.
+- **Q: (Trap) Is R²_max ≈ 0.98 trustworthy?** → **Yes, as an upper bound — report ~0.98, not a single
+  decimal.** The first pass used only ~13 stations (loose 0.977); the proper re-run (32 stations, 6
+  countries, 1,241 station-days) gives 0.982 optimistic / **0.979** conservative, and ~0.98 under both
+  EPA breakpoint tables. Don't quote the bootstrap band as a tight CI (few stations), and note the top
+  ~13% (200+ AQI) is still extrapolated conservatively. What matters: label noise is only ~2% of the
+  label variance, so our score is task-limited.
 - **Q: Why EfficientNet-B0, not a bigger model?** → **The benchmark itself found B0 beats bigger nets on
   this small dataset;** the bottleneck is label noise and leakage, which capacity can't fix.
 - **Q: Why a separate point head — isn't the median enough?** → **The median under-shoots on skewed data
@@ -750,7 +751,7 @@ if any were miscalculated.
 3. **R² ≠ squared correlation.** Don't call the Pearson number "R²."
 4. **0.22 is good, not bad** — field-normal, ranks well, near the ceiling; the contribution is exposing
    leakage.
-5. **The ceiling is an UPPER bound, not a target.** 0.22 can sit far below 0.977 with nothing wrong.
+5. **The ceiling is an UPPER bound, not a target.** 0.22 can sit far below ~0.98 with nothing wrong.
 6. **Clean-vs-contaminated is directional.** Clean (−0.86) is from the leaky model; the claim is
    contaminated ≫ clean, not clean = 0.22.
 7. **We don't accuse the authors** of a specific split — we say their split *admits* the leak.
@@ -768,8 +769,8 @@ if any were miscalculated.
 17. **Monotone intervals are guaranteed by construction,** not by a penalty term.
 18. **The heads train in log space; results are reported in AQI** (exponentiated back before conformal
     widening).
-19. **CV is done (R² = 0.385 ± 0.19); only C2 is still provisional** — R²_max ≈ 0.977 is a loose,
-    optimistic upper bound (report as a range ≈0.90–0.95), pending a clean high-AQI re-run.
+19. **CV and C2 are both done.** CV: R² = 0.385 ± 0.19. C2: R²_max ≈ 0.98 (0.979–0.982, 32 stations /
+    6 countries) — an upper bound; only the top ~13% (200+ AQI) is extrapolated conservatively.
 
 ## 22. Layered glossary
 

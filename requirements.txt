@@ -24,3 +24,6 @@ matplotlib>=3.8
 tqdm>=4.66
 pyyaml>=6.0
 requests>=2.31
+
+# Demo only (Phase 10 Gradio app; the Hugging Face Space uses app/requirements.txt)
+gradio>=4.44

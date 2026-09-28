@@ -1168,6 +1168,179 @@ This turns the single-split 0.22 into a robust interval across station-disjoint 
 to keep `cv_folds.csv` + `cv_summary.json`."""),
 ]
 
+# ===========================================================================
+# 08_abstention.ipynb  (C3 — inference-time abstention: OOD gate + uncertainty gate)
+# ===========================================================================
+ABSTENTION = [
+    ("md", """# C3 — knowing when to refuse (inference-time abstention)
+
+An honest system must sometimes say **"I can't answer this."** Two gates, checked in order:
+**(1) OOD/unusable** — is this even a valid daytime street photo? (Mahalanobis distance in the model's
+feature space, + interpretable brightness/detail/sky checks). **(2) Uncertainty** — is the model too
+unsure? (log-space interval width). Thresholds are set on **calibration only**. We measure selective
+risk–coverage/AURC and OOD AUROC/FPR95 against three external "should-refuse" sets, and save the
+**bundle** the live demo uses. Narrative: `docs/09_abstention.md`. Uses the trained model — **no retrain**."""),
+
+    ("md", BOOTSTRAP_MD),
+    ("code", KAGGLE_BOOTSTRAP),
+
+    ("code", """import os, json, glob, numpy as np, pandas as pd, torch, matplotlib.pyplot as plt
+from PIL import Image
+from src.config import load_config
+from src import data, physics, splits as S, dataset as Dd, model as Mm, train as T
+from src import calibrate as C, recalibrate as R, abstain as A, inference as Inf
+cfg = load_config()
+device = "cuda" if torch.cuda.is_available() else "cpu"
+WORK = "/kaggle/working"
+cache_path = os.path.join(WORK, "pm25_cache", "physics_maps_%d.npy" % cfg["data"]["image_size"])
+out_root = os.path.join(WORK, "pm25_outputs"); os.makedirs(out_root, exist_ok=True)
+os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+
+ds, df = data.load_clean(cfg["data"]["hf_repo"], from_disk=False, seed=cfg["seed"])
+if not os.path.exists(cache_path):
+    physics.build_map_cache(len(ds), lambda i: data.get_image(ds, i), cache_path,
+        size=cfg["data"]["image_size"], patch=cfg["physics"]["dcp_patch"],
+        omega=cfg["physics"]["dcp_omega"], top_frac=cfg["physics"]["atmos_top_frac"], t_min=cfg["physics"]["t_min"])
+cache = physics.load_map_cache(cache_path)
+print("rows:", len(df), "| device:", device)"""),
+
+    ("md", """## 1 — Get the honest model (load the saved checkpoint, or train it once)
+
+Same station-grouped model as the headline run. If `best_model.pth` already sits in the outputs
+(from a previous commit's Save Version), it is reused; otherwise it trains once (~30 min)."""),
+    ("code", """out_dir = os.path.join(out_root, "station_grouped")
+ckpt = os.path.join(out_dir, "best_model.pth")
+sp = S.make_splits(df, strategy="station_grouped", seed=cfg["seed"],
+        station_col=cfg["data"]["station_col"], time_col=cfg["data"]["time_col"],
+        lon_col=cfg["data"]["lon_col"], lat_col=cfg["data"]["lat_col"])
+loaders = Dd.make_dataloaders(ds, sp, cache, cfg, num_workers=2)
+net = Mm.build_model(cfg).to(device)
+if not os.path.exists(ckpt):
+    print("no checkpoint found -> training one station-grouped model ...")
+    T.train_model(net, loaders, cfg, device=device, out_dir=out_dir)
+T.load_checkpoint(ckpt, net, map_location=device)
+print("model ready:", ckpt)"""),
+
+    ("md", """## 2 — Fit the two gates on calibration (no test/OOD data used)
+
+Mahalanobis on cal-good backbone features -> `tau_ood` (5% false-refusal budget); cal log-widths ->
+`tau_width` (target 90% coverage). Also fit isotonic + conformal Q so we can score test errors."""),
+    ("code", """cal = T.collect_outputs(net, loaders["cal"], device)
+test = T.collect_outputs(net, loaders["test"], device)
+cal_feats = T.collect_features(net, loaders["cal"], device)["feats"]
+
+ymean, ystd = float(net.y_mean), float(net.y_std)
+iso = R.fit_isotonic(T.point_to_aqi(cal["point_out"], ymean, ystd), cal["y_raw"])
+Q = C.conformal_Q(np.exp(cal["q_log"]), cal["y_raw"], cfg["calibration"]["coverage"])
+
+maha = A.fit_mahalanobis(cal_feats)
+tau_ood = A.ood_threshold(A.mahalanobis_score(maha, cal_feats), false_refusal_budget=0.05)
+tau_width = A.width_threshold(A.log_interval_width(cal["q_log"]), target_coverage=0.90)
+print("tau_ood = %.2f  |  tau_width = %.3f (log-AQI)" % (tau_ood, tau_width))
+
+# test-set point, intervals, per-photo error + log-width (the uncertainty signal)
+test_point = R.apply_isotonic(iso, T.point_to_aqi(test["point_out"], ymean, ystd))
+test_iv = C.apply_conformal(np.exp(test["q_log"]), Q)
+test_err = np.abs(test_point - test["y_raw"])
+test_width = A.log_interval_width(test["q_log"])"""),
+
+    ("md", """## 3 — Selective prediction: risk–coverage + AURC (refusing the unsure photos helps)"""),
+    ("code", """cov, risk = A.risk_coverage_curve(test_width, test_err)
+aurc = A.aurc(test_width, test_err); e_aurc = A.excess_aurc(test_width, test_err)
+rand_aurc = A.aurc(np.random.default_rng(0).permutation(test_width), test_err)
+print("AURC (log-width) = %.2f  |  excess-AURC vs oracle = %.2f  |  random-signal AURC = %.2f"
+      % (aurc, e_aurc, rand_aurc))
+for c in (0.90, 0.80, 0.70):
+    m = A.selective_metrics_at_coverage(test_width, test["y_raw"], test_point, test_iv, c)
+    print("  @%.0f%% coverage: MAE %.1f  RMSE %.1f  cat-acc %.2f  interval-cov %.2f"
+          % (c*100, m["MAE"], m["RMSE"], m["category_accuracy"], m["interval_coverage"]))
+plt.figure(figsize=(6,4)); plt.plot(cov, risk); plt.xlabel("coverage (fraction answered)")
+plt.ylabel("selective MAE (AQI)"); plt.title("Risk–coverage (lower-left is better)")
+plt.savefig(os.path.join(out_root, "risk_coverage.png"), dpi=120, bbox_inches="tight"); plt.show()"""),
+
+    ("md", """## 4 — Attach the OOD sets, then measure the OOD gate
+
+Add these as **Kaggle datasets** (⋮ → Add Input) and set their folders below; any set that's missing is
+skipped. **ExDark** (night, far-OOD), **DTD** textures (featureless, far-OOD), **MIT-Indoor** (indoor,
+near-OOD). Every image goes through the SAME `physics.five_channel` pipeline as a real photo."""),
+    ("code", """OOD_DIRS = {   # edit to match your attached datasets
+    "ExDark":     "/kaggle/input/exdark",
+    "DTD":        "/kaggle/input/dtd/dtd/images",
+    "MIT-Indoor": "/kaggle/input/mit-indoor-scenes/indoorCVPR_09/Images",
+}
+NEAR_OOD = {"MIT-Indoor"}   # indoor is 'near' OOD (still a photo); night/textures are 'far'
+
+def load_images(d, limit=300):
+    if not d or not os.path.isdir(d):
+        return []
+    files = []
+    for e in ("*.jpg","*.jpeg","*.png","*.JPEG","*.JPG","*.ppm"):
+        files += glob.glob(os.path.join(d, "**", e), recursive=True)
+    files = sorted(files)[:limit]
+    out = []
+    for f in files:
+        try: out.append(Image.open(f).convert("RGB"))
+        except Exception: pass
+    return out
+
+@torch.no_grad()
+def ood_scores_for(images):
+    net.eval(); scores = []
+    for im in images:
+        x = torch.from_numpy(physics.five_channel(im))[None].to(device)
+        scores.append(A.mahalanobis_score(maha, net.backbone(x).cpu().numpy())[0])
+    return np.array(scores)
+
+# in-distribution reference = the real test photos' Mahalanobis scores
+id_scores = A.mahalanobis_score(maha, T.collect_features(net, loaders["test"], device)["feats"])
+print("loaded ID (test) photos:", len(id_scores))"""),
+
+    ("code", """rows = [{"set": "PM25Vision-good (test)", "n": len(id_scores),
+         "refuse_rate": round(A.refuse_rate(id_scores, tau_ood), 3), "kind": "in-distribution"}]
+per_set_scores = {}
+for name, d in OOD_DIRS.items():
+    imgs = load_images(d)
+    if not imgs:
+        print("skip", name, "(no images at", d, ")"); continue
+    s = ood_scores_for(imgs); per_set_scores[name] = s
+    rows.append({"set": name, "n": len(s), "refuse_rate": round(A.refuse_rate(s, tau_ood), 3),
+                 "kind": ("near-OOD" if name in NEAR_OOD else "far-OOD")})
+refuse_tbl = pd.DataFrame(rows); display(refuse_tbl)
+
+ood_summary = {}
+if per_set_scores:
+    all_ood = np.concatenate(list(per_set_scores.values()))
+    ood_summary["all"] = A.ood_metrics(id_scores, all_ood)
+    far = [s for k,s in per_set_scores.items() if k not in NEAR_OOD]
+    near = [s for k,s in per_set_scores.items() if k in NEAR_OOD]
+    if far:  ood_summary["far"]  = A.ood_metrics(id_scores, np.concatenate(far))
+    if near: ood_summary["near"] = A.ood_metrics(id_scores, np.concatenate(near))
+    for k,v in ood_summary.items():
+        print("OOD %-5s: AUROC %.3f  AUPR %.3f  FPR@95 %.3f  (n_ood=%d)"
+              % (k, v["AUROC"], v["AUPR"], v["FPR@95TPR"], v["n_ood"]))
+else:
+    print("No OOD sets attached — selective-prediction results (step 3) still stand.")"""),
+
+    ("md", """## 5 — Save results + the demo bundle"""),
+    ("code", """results = {"tau_ood": tau_ood, "tau_width": tau_width, "AURC": aurc, "excess_AURC": e_aurc,
+           "random_AURC": rand_aurc, "refuse_rates": refuse_tbl.to_dict(orient="records"),
+           "ood_metrics": ood_summary}
+json.dump(results, open(os.path.join(out_root, "abstention_results.json"), "w"), indent=2, default=float)
+
+# the demo bundle: checkpoint + Q/stats/isotonic + thresholds + Mahalanobis (see docs/11_demo.md)
+bundle_dir = os.path.join(out_root, "demo_bundle"); os.makedirs(bundle_dir, exist_ok=True)
+import shutil; shutil.copy(ckpt, os.path.join(bundle_dir, "best_model.pth"))
+Inf.save_bundle(bundle_dir, net, Q, ymean, ystd, iso, tau_ood, tau_width, maha=maha)
+print("saved:", os.path.join(out_root, "abstention_results.json"))
+print("demo bundle ->", bundle_dir, ":", os.listdir(bundle_dir))"""),
+
+    ("md", """## Done — paste me the numbers
+
+Paste the **risk–coverage/AURC** line, the **selective metrics at 90/80/70%**, and the **OOD table**
+(refuse-rates + AUROC/FPR95, near vs far). Then **Save Version** and download `demo_bundle/` from the
+Output tab for the live demo (`docs/11_demo.md`)."""),
+]
+
 if __name__ == "__main__":
     build("00_setup.ipynb", SETUP)
     build("01_data_audit.ipynb", AUDIT)
@@ -1180,3 +1353,4 @@ if __name__ == "__main__":
     build("kaggle_pipeline.ipynb", KAGGLE)
     build("09_leakage.ipynb", LEAKAGE)
     build("10_crossval.ipynb", CROSSVAL)
+    build("08_abstention.ipynb", ABSTENTION)

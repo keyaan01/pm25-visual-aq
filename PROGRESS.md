@@ -20,8 +20,10 @@ everything, and the accuracy levers + C2 hardening are built.** The story so far
 
 **Audit 2 (2026-09-28) — 3 read-only agents re-checked everything.** Verdict: R² (single + CV),
 leakage, and the causal test are **computed correctly and honestly — no result-affecting bug.** The one
-over-statement was **C2**: R²_max ≈ 0.977 is a loose, optimistic upper bound (small/low-AQI sample), now
-reframed as a range (≈0.90–0.95) with a conservative estimate + `p_mass_covered` flag. Reporting polish
+over-statement was **C2**: the first-run R²_max ≈ 0.977 was a loose upper bound (13-station sample). The
+2026-09-28 re-run (32 stations / 6 countries / 1,241 station-days) gives **R²_max ≈ 0.98** (0.979
+conservative – 0.982 optimistic, breakpoint-insensitive) — the feared drop to ~0.90–0.95 did not
+happen. Reporting polish
 applied across docs (±-convention, dual Δ_leak led by MAE, variance-amplification note, correlated-fold
 CI caveat). **Accuracy levers built** (honest, cal-selected): EMA + flip-TTA + seed ensembling in
 `train.py`/`leakage.py` (config flags; `10_crossval.ipynb` has an `ACCURACY_PUSH` toggle). **Guards
@@ -104,11 +106,11 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,096 rows after dedup, 3,259 station
 | 5 | Training — pinball + MSE point head, log-target quantiles (§3.7, §3.12) | ✅ built + tested |
 | 6 | Conformal calibration + evaluation (§3.8, §3.11) | ✅ built + tested (coverage ≈ 0.90) |
 | A | Leakage measurement (the "story") | ✅ **run + verified + documented** (Δ_leak=0.539) |
-| 7 / C2 | Error ceiling via OpenAQ (§3.10) | ✅ built + first run in; R²_max≈0.977 is a **loose/optimistic** upper bound → reframed as a RANGE (≈0.90–0.95) + conservative estimate + high-AQI-targeted fetch; user re-runs 07 for a clean number |
+| 7 / C2 | Error ceiling via OpenAQ (§3.10) | ✅ **done** — re-run (32 stations / 6 countries / 1,241 station-days): **R²_max ≈ 0.98** (0.979–0.982, breakpoint-insensitive); interval-width floor ≈35 AQI. Top ~13% (200+ AQI) extrapolated; optional wider re-run only refines it |
 | CV | Leakage-safe 5-fold cross-validation (§3.11) | ✅ **run + done**: R²=0.385±0.19, coverage 0.895 (`10_crossval.ipynb`, GroupKFold by station); accuracy-push toggle (EMA/TTA/ensemble) added for an optional higher-R² run |
-| 8 / C3 | Abstention via ExDark/DTD/Indoor (§3.9) | ⏳ after C2 |
+| 8 / C3 | Abstention (OOD + uncertainty gates) (§3.9) | ✅ **built + smoke-tested** (`src/abstain.py`, `train.collect_features`, `08_abstention.ipynb`); user runs once with ExDark/DTD/MIT-Indoor |
 | 9 | Ablations (§3.11) | ⏳ optional |
-| 10 | Frontend demo (Gradio) | ⏳ needs trained model |
+| 10 | Frontend demo (Gradio → HF Space) | ✅ **built + smoke-tested** (`src/inference.py`, `app/app.py`, `docs/11_demo.md`); user runs 08 to get the bundle, then creates the Space |
 
 ## Key decisions
 
@@ -128,17 +130,21 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,096 rows after dedup, 3,259 station
 - C3 needs external image sets (ExDark, DTD, MIT-Indoor) — user downloads when we reach it.
 - Demo hosting (temporary Colab/Kaggle link vs permanent HF Space) — decide at Phase 10.
 
-## Immediate next step
+**C3 abstention + the demo are now BUILT + smoke-tested (2026-09-28).** `src/abstain.py` (Mahalanobis
+OOD gate + handcrafted backup + log-width uncertainty gate + risk-coverage/AURC + OOD AUROC/FPR95),
+`train.collect_features`, `src/inference.py` (one-photo pipeline + bundle I/O), `app/app.py` (Gradio),
+`notebooks/08_abstention.ipynb`, `docs/09_abstention.md` + `docs/11_demo.md`, and new
+`tests/smoke_abstain.py` + `tests/smoke_inference.py`. All local smoke suites pass. Uses the trained
+model — no retrain.
 
-Two user runs (both optional / when convenient), then C3:
-1. **Clean C2 re-run:** run `07_error_ceiling.ipynb` with a free OpenAQ key — it now targets
-   high-pollution regions and prints an honest optimistic→conservative range; paste it → finalise C2 in
-   `docs/RESULTS.md` (replacing the provisional ≈0.90–0.95 range).
-2. **(Optional) accuracy push:** run `10_crossval.ipynb` with `ACCURACY_PUSH = True` (EMA + TTA + seed
-   ensemble per fold, ~15 h on a T4) → paste the new mean ± CI → add as a **new row** beside the honest
-   baseline in `docs/RESULTS.md`.
-3. Then build **C3 (abstention)**: `src/abstain.py` + `notebooks/08_abstention.ipynb` (OOD gate +
-   log-width uncertainty gate; ExDark/DTD/MIT-Indoor). Then Phase 10 Gradio demo.
+## Immediate next step (all user-side runs; when convenient)
+
+1. **C3 run:** attach ExDark / DTD / MIT-Indoor as Kaggle datasets, run `08_abstention.ipynb` → paste
+   the risk–coverage/AURC + OOD table → numbers go into `docs/RESULTS.md`. It also saves `demo_bundle/`.
+2. **Live demo:** download `demo_bundle/`, then follow `docs/11_demo.md` to create the free **Hugging
+   Face Space** (Gradio) and upload `app.py` + `src/` + `requirements.txt` + `README.md` + the bundle.
+3. **Clean C2 re-run:** run `07_error_ceiling.ipynb` with a free OpenAQ key → finalise the C2 range.
+4. **(Optional) accuracy push:** `10_crossval.ipynb` with `ACCURACY_PUSH = True` → new row beside the baseline.
 
 The `docs/PROJECT_EXPLAINED.pdf` (detailed "what every result means" write-up) is generated for the
 teacher-facing explanation.

@@ -27,13 +27,13 @@ visual signal, class imbalance, and domain shift — so our honest R² (0.22 sin
 can sit well below R²_max with nothing wrong. Read the ceiling as "the most any model could hope for on
 these labels," not "what we should be getting."
 
-> **Honesty note (from the correctness audit).** The first-run point value **R²_max ≈ 0.977 is a
-> *loose, optimistically-biased* upper bound** — do not quote it as a precise "0.977 (95% CI …)". Three
-> biases all push it *up*: the reference sample under-covered the high-AQI bands (largest within-day
-> swings), hourly readings smooth sub-hourly variation, and the ceiling is split-specific. The honest
-> range is roughly **0.90–0.95** (realistic) up to ~0.95–0.98 (this small sample's optimistic end). The
-> code now also reports a **conservative** ceiling and a `p_mass_covered` optimism flag; a re-run with
-> deliberate high-AQI coverage is what tightens it.
+> **Measured value (2026-09-28 re-run, 32 stations / 6 countries / 1,241 station-days).**
+> **R²_max ≈ 0.98** — 0.982 (optimistic) to **0.979** (conservative, imputing the uncovered top bands),
+> and breakpoint-insensitive (historical 0.982 / 2024 revision 0.980). Do **not** quote the
+> cluster-bootstrap band [0.970, 0.993] as a tight 95% CI (only 32 stations). An earlier 13-station pass
+> gave a looser 0.977 and we feared the true value might fall to ~0.90–0.95 once high-AQI bands were
+> covered — the better-sampled run shows it does **not**: it holds at ~0.98. The top ~13% of the label
+> distribution (200+ AQI) is still extrapolated conservatively, which only moves the ceiling to 0.979.
 
 ## How we estimate it — three best-practice refinements
 

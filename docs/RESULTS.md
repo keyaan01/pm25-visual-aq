@@ -222,6 +222,43 @@ that skipped the isotonic step was fixed to match the ledger, and defensive asse
 
 ---
 
+## 7. The error ceiling (C2) — how much error is unavoidable
+
+*How good could ANY model be, given the labels are **daily averages** but photos are **instants**?
+`R²_max = 1 − Var(ε)/Var(y)`, an UPPER bound from label noise only. (Paper §3.10; code `src/ceiling.py`;
+narrative [`08_error_ceiling.md`](08_error_ceiling.md).) Reference: hourly PM2.5 from **32 OpenAQ
+stations across 6 countries, 1,241 station-days.*
+
+- **Var(ε)** (within-day label noise) = **208.6** optimistic / **247.9** conservative (SD ≈ 14–16 AQI).
+- **Var(y)** (station-grouped test spread) = **11,708** (SD ≈ 108).
+- **R²_max ≈ 0.98** — **0.982** (optimistic) … **0.979** (conservative, imputing the uncovered high
+  bands); breakpoint-insensitive (historical 0.982 / 2024 revision 0.980). Cluster-bootstrap band
+  [0.970, 0.993] from 32 stations — indicative, not a tight CI.
+- **Interval-width floor ≈ 35 AQI** — no honest 90% interval should be narrower than the pollution's own
+  within-day spread.
+
+**v(m) — within-day AQI variance by pollution band** (the error-by-band story):
+
+| band (AQI) | station-days | v (variance) | within-day SD | dataset weight |
+|---|---|---|---|---|
+| 0–50 | 715 | 129.4 | 11.4 | 0.245 |
+| 50–100 | 430 | 104.7 | 10.2 | 0.255 |
+| 100–150 | 86 | 501.8 | 22.4 | 0.246 |
+| 150–200 | 10 | 104.9 | 10.2 | 0.254 |
+
+**What it means:** label noise is only **~2% of the label variance**, so daily-average labeling costs at
+most ~2 points of R². The honest **0.22 (single) / 0.385 (CV)** sits far below the ~0.98 ceiling — so the
+gap is the **difficulty of reading pollution from one photo (the visual task), not noisy labels.** This
+is exactly what C2 was built to establish.
+
+> **Honest caveat.** The reference still under-covers the very-high-AQI bands (200+, ≈13% of label mass,
+> and the 150–200 band has only n=10), which are imputed with a **conservative (high)** within-day
+> variance. Even so the ceiling only drops from 0.982 to **0.979**, so the conclusion is robust. (An
+> earlier 13-station pass gave a looser 0.977 and we feared the true value might fall to ~0.90–0.95;
+> this 32-station / 6-country run shows it does not — it holds at ~0.98.)
+
+---
+
 ## Artifacts (for the paper)
 
 - `outputs/leakage_gradient.csv` — the table in §4.
@@ -232,19 +269,20 @@ that skipped the isotonic step was fixed to match the ledger, and defensive asse
 
 ## Provisional / still to come
 
-- **C2 — error ceiling (first run, provisional — report as a RANGE, not 0.977):** the first pass gave
-  R²_max ≈ 0.977, but Audit 2 showed this is a **loose, optimistically-biased upper bound**, so we do
-  **not** report it as "0.977 (95% CI [0.963, 0.994])" — that is false precision. Three biases all push
-  it *up*: (i) the reference sample (only ~13 stations) **under-covered the high-AQI bands**, where
-  within-day swings are largest, and those bands were renormalized away → Var(ε) understated; (ii)
-  hourly readings smooth sub-hourly variation; (iii) the ceiling is **split-specific** (it scales with
-  each split's label variance), so one global number misleads. The **honest range is ≈ 0.90–0.95**
-  (realistic) up to ~0.95–0.98 (this small sample's optimistic end); the code now also reports a
-  **conservative** ceiling (imputing the uncovered high bands with a high v) and a `p_mass_covered`
-  optimism flag, and the OpenAQ fetch now deliberately targets high-pollution regions. A clean re-run of
-  `07_error_ceiling.ipynb` (with the high-AQI targeting + a free OpenAQ key) is pending. **The
-  load-bearing conclusion is unchanged:** label noise is small vs label spread, so the honest 0.22–0.39
-  R² is limited by the *visual task*, not by noisy labels. *(Paper §3.10.)*
-- **C3 — abstention:** refuse-to-answer on unusable photos; risk–coverage curves. *(Paper §3.9.)*
+- **C2 — error ceiling: ✅ done, see §7.** Measured on 32 stations / 6 countries / 1,241 station-days:
+  **R²_max ≈ 0.98** (0.979 conservative – 0.982 optimistic, breakpoint-insensitive). Only the top ~13%
+  of the label distribution (200+ AQI) is still extrapolated (conservatively); an optional wider-coverage
+  re-run would refine that without changing the ~0.98 conclusion.
+- **C3 — abstention (built + smoke-tested; pending one Kaggle run):** two gates — an **OOD gate**
+  (shrinkage-Mahalanobis distance in backbone-feature space, + interpretable brightness/detail/sky
+  checks) checked first, then an **uncertainty gate** (log-space interval width); both thresholds fit on
+  calibration only (5% false-refusal budget). `notebooks/08_abstention.ipynb` reports selective
+  **risk–coverage/AURC** (+ metrics at 90/80/70% coverage) and **OOD AUROC/AUPR/FPR@95** against
+  ExDark (night) / DTD (textures) / MIT-Indoor (indoor), near- vs far-OOD, and a refuse-rate table.
+  Numbers land here after the run. *(Code: `src/abstain.py`, `train.collect_features`; narrative:
+  [`09_abstention.md`](09_abstention.md); §3.9.)*
+- **Live demo (built):** `src/inference.py` + `app/app.py` (Gradio) — upload a photo → AQI, honest
+  interval, EPA category, an **answer/abstain badge**, and the physics maps. Deploys as a permanent
+  Hugging Face Space; steps in [`11_demo.md`](11_demo.md). *(Phase 10.)*
 - **Bigger model:** a larger backbone can be added as a **new row** beside EfficientNet-B0 (both on
   record). Backbone search was declined; B0 is the paper's strongest on this dataset.
