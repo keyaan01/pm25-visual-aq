@@ -6,8 +6,8 @@ the AQI estimate, the honest interval, the EPA category, an answer/abstain badge
 maps so viewers can SEE the haze signal.
 
 DEPLOY (Hugging Face Space, Gradio SDK): put this file, the repo's `src/` folder, `requirements.txt`,
-a `README.md` with the Space header, and a `model/` folder (best_model.pth + inference_bundle.json +
-maha_*.npy) at the Space root. See docs/11_demo.md for click-by-click steps.
+a `README.md` with the Space header, and a `model/` folder (best_model.pth + inference_bundle.json) at
+the Space root. See docs/11_demo.md for click-by-click steps.
 """
 import os
 import sys
@@ -78,12 +78,13 @@ with gr.Blocks(title="Visual Air-Quality Estimation") as demo:
     gr.Markdown("# 🌫️ Air quality from a street photo — *honestly*\n"
                 "Upload a daytime street photo. The model returns an **AQI estimate**, an honest "
                 "**low–high range**, the **EPA category**, and — crucially — it will **refuse to "
-                "answer** on night/indoor/featureless photos it shouldn't guess on. "
+                "answer** on **night** or **featureless** photos it shouldn't guess on. "
                 "The two maps show the physics it uses: **transmission** (dark = more haze) and "
-                "**inverted saturation** (bright = washed-out/hazy).")
+                "**inverted saturation** (bright = washed-out/hazy). "
+                "*(Indoor scenes are a known limitation of the station-invariant gate — see the writeup.)*")
     if _LOAD_ERROR:
         gr.Markdown(f"> ⚠️ Model bundle not found in `{MODEL_DIR}` ({_LOAD_ERROR}). "
-                    "Add `best_model.pth` + `inference_bundle.json` (+ `maha_*.npy`) there.")
+                    "Add `best_model.pth` + `inference_bundle.json` there.")
     with gr.Row():
         with gr.Column():
             inp = gr.Image(type="pil", label="Street photo")

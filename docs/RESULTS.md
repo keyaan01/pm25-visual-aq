@@ -273,14 +273,23 @@ is exactly what C2 was built to establish.
   **R²_max ≈ 0.98** (0.979 conservative – 0.982 optimistic, breakpoint-insensitive). Only the top ~13%
   of the label distribution (200+ AQI) is still extrapolated (conservatively); an optional wider-coverage
   re-run would refine that without changing the ~0.98 conclusion.
-- **C3 — abstention (built + smoke-tested; pending one Kaggle run):** two gates — an **OOD gate**
-  (shrinkage-Mahalanobis distance in backbone-feature space, + interpretable brightness/detail/sky
-  checks) checked first, then an **uncertainty gate** (log-space interval width); both thresholds fit on
-  calibration only (5% false-refusal budget). `notebooks/08_abstention.ipynb` reports selective
-  **risk–coverage/AURC** (+ metrics at 90/80/70% coverage) and **OOD AUROC/AUPR/FPR@95** against
-  ExDark (night) / DTD (textures) / MIT-Indoor (indoor), near- vs far-OOD, and a refuse-rate table.
-  Numbers land here after the run. *(Code: `src/abstain.py`, `train.collect_features`; narrative:
-  [`09_abstention.md`](09_abstention.md); §3.9.)*
+- **C3 — abstention (built + smoke-tested; audited + corrected; pending one Kaggle run):** two gates — a
+  **deployed OOD gate** using **station-invariant handcrafted checks** (too dark / too flat) checked
+  first, then an **uncertainty gate** (log-space interval width). A shrinkage-Mahalanobis feature-space
+  detector is computed and **reported for comparison only** — it over-refuses valid unseen-station photos
+  (station shift), which we now quantify with a **confound-controlled** same-station-holdout threshold.
+  `τ_ood` (5% false-refusal budget) is **fit on one held-out good slice (`good_fit`) and reported on a
+  disjoint one (`good_eval`)** so the budget is a real check, not true by construction, and uses a
+  robust **top-k** rule (not a raw percentile) because the handcrafted score is spiked at 0. Selective
+  prediction is reported on the **deployed log-width** signal (headline), raw width as a labelled
+  diagnostic. `notebooks/08_abstention.ipynb` reports **risk–coverage/AURC** (+ metrics at 90/80/70%
+  coverage) and **OOD AUROC/AUPR/FPR@95** against ExDark (night) / DTD (textures) / MIT-Indoor (indoor),
+  near- vs far-OOD, and a refuse-rate table. **Honest limitation:** the deployed gate catches night /
+  featureless, *not* well-lit indoor (near-OOD) — measured, not hidden. Numbers land here after the run.
+  *(A code+logic audit (this session) confirmed the design is sound — gate order, no test-label leakage,
+  conformal validity, metric conventions, pipeline order — and fixed the circular-threshold, resolution,
+  report-vs-deploy, and false "indoor" claims. Code: `src/abstain.py`, `train.collect_features`;
+  narrative: [`09_abstention.md`](09_abstention.md); §3.9.)*
 - **Live demo (built):** `src/inference.py` + `app/app.py` (Gradio) — upload a photo → AQI, honest
   interval, EPA category, an **answer/abstain badge**, and the physics maps. Deploys as a permanent
   Hugging Face Space; steps in [`11_demo.md`](11_demo.md). *(Phase 10.)*

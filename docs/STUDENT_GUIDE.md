@@ -57,7 +57,7 @@ confident number that might be wrong.
 🎓 The project takes **one street-level photograph** as input and predicts an **air-quality value** as
 output. On top of the basic prediction it adds four "honesty" features:
 1. a **range** (low / middle / high) instead of a single number,
-2. a way to **refuse to answer** when the photo is unusable (night, indoors, no sky),
+2. a way to **refuse to answer** when the photo is unusable (night or featureless; indoor is a known limitation),
 3. an estimate of how much error is **physically impossible to avoid**, and
 4. an evaluation method that doesn't **cheat** (no data leakage — the heart of the project).
 
@@ -611,7 +611,9 @@ leaky 0.759 exceeding this whole range.
 ## 17. Knowing when to shut up — abstention (planned)
 
 🧒 A good doctor says "I can't read this blurry X-ray — get a clearer one" instead of guessing. Our
-model should **refuse to answer** on unusable photos (taken at night, indoors, or with no sky).
+model should **refuse to answer** on unusable photos. The deployed gate catches **night** and
+**featureless** photos; well-lit indoor scenes slip past it — a documented limitation of using
+station-invariant brightness/detail checks (see [09_abstention](09_abstention.md)).
 
 🎓 **Abstention (the reject option):** detect out-of-distribution inputs and decline rather than emit a
 meaningless number. We'd measure it with a **risk–coverage curve** (accuracy plotted against how often

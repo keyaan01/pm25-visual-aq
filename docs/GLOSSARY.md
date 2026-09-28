@@ -26,7 +26,7 @@ Plain-language meanings for the terms you'll meet. For deeper explanations, the
 | **Conformal prediction / CQR** | A calibration step that makes the interval contain the truth a guaranteed % of the time. |
 | **Coverage** | The % of test cases where the true value actually landed inside the predicted interval. |
 | **Calibration set** | A held-out slice used only to size the conformal correction — never for training. |
-| **Abstention / reject option** | Letting the model refuse to answer on inputs it can't handle (night, indoor, no sky). |
+| **Abstention / reject option** | Letting the model refuse to answer on inputs it can't handle. The deployed gate refuses **night** or **featureless** photos; indoor scenes are a documented limitation. |
 | **Risk–coverage curve** | A plot of accuracy vs. how often the model chooses to answer. |
 | **Error ceiling / Bayes error** | The best score any model could get, limited by noise in the labels themselves. |
 | **MAE / RMSE / R²** | Standard regression scores (average error / error that punishes big misses / fraction of variation explained). |

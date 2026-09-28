@@ -4,7 +4,7 @@ Estimate PM2.5 air quality (as a US-EPA **AQI index**, 1–530 — *not* µg/m³
 single street-level photo, and do it **honestly**:
 
 - output a **calibrated low / median / high range** instead of one number,
-- **refuse to answer** on unusable inputs (night, indoor, no sky),
+- **refuse to answer** on unusable inputs (night or featureless; indoor is a documented limitation),
 - estimate how much error is **physically unavoidable**,
 - and **evaluate without leakage** (splitting by station / region / time).
 

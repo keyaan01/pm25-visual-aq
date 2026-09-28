@@ -12,13 +12,13 @@ A small folder produced by `notebooks/08_abstention.ipynb` (its last cell saves 
 ```
 model/
   best_model.pth            # the trained checkpoint
-  inference_bundle.json     # Q, y_mean, y_std, isotonic knots, tau_ood, tau_width
-  maha_mean.npy             # the OOD detector
-  maha_precision.npy
+  inference_bundle.json     # Q, y_mean, y_std, isotonic knots, tau_ood, tau_width, handcrafted_tau
 ```
 
-Download that `model/` folder from the Kaggle run's **Output** (or rebuild it from any trained
-checkpoint with `inference.save_bundle`).
+The demo's OOD gate uses the **station-invariant handcrafted checks** (too dark / too flat), so the
+bundle is just these two files — no Mahalanobis arrays needed. Download that `model/` folder from the
+Kaggle run's **Output** (`demo_bundle/`), or rebuild it from any trained checkpoint with
+`inference.save_bundle(..., maha=None, handcrafted_tau=...)`.
 
 ## Try it locally first (optional, ~1 min)
 
@@ -27,7 +27,9 @@ pip install gradio
 MODEL_DIR=path/to/model python app/app.py
 ```
 
-Gradio prints a `http://127.0.0.1:7860` link. Upload a photo; a black/indoor photo should **abstain**.
+Gradio prints a `http://127.0.0.1:7860` link. Upload a photo; a black (night) or blank/featureless photo
+should **abstain**. (A well-lit indoor photo is *not* caught by the station-invariant gate — a documented
+limitation; see [`docs/09_abstention.md`](09_abstention.md).)
 
 ## Deploy it permanently (free Hugging Face Space)
 

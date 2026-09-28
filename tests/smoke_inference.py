@@ -23,7 +23,7 @@ from src.config import load_config  # noqa: E402
 FIX = str(Path(__file__).resolve().parent / "fixture_ds")
 
 
-def _build_bundle(tmp):
+def _build_bundle(tmp, with_maha=True):
     cfg = load_config()
     cfg["train"]["batch_size"] = 4
     cfg["model"]["pretrained"] = False
@@ -49,7 +49,9 @@ def _build_bundle(tmp):
     maha = A.fit_mahalanobis(cal_feats)
     tau_ood = A.ood_threshold(A.mahalanobis_score(maha, cal_feats))
     tau_w = A.width_threshold(A.log_interval_width(cal["q_log"]), 0.9)
-    I.save_bundle(out_dir, net, Q, ymean, ystd, iso, tau_ood, tau_w, maha=maha)
+    # with_maha=False mirrors the DEPLOYED demo bundle (handcrafted-only OOD gate, no Mahalanobis arrays)
+    I.save_bundle(out_dir, net, Q, ymean, ystd, iso, tau_ood, tau_w,
+                  maha=(maha if with_maha else None), handcrafted_tau=0.5)
     return I.load_bundle(out_dir, device="cpu"), ds, cal_feats, net
 
 
@@ -89,7 +91,23 @@ def test_black_image_is_ood():
           % (r["ood_score"], cal_mean, r["handcrafted_ood"]))
 
 
+def test_deployed_handcrafted_gate():
+    """The DEPLOYED config: bundle with maha=None -> predict() runs the handcrafted-only OOD path."""
+    tmp = tempfile.mkdtemp()
+    bundle, ds, cal_feats, net = _build_bundle(tmp, with_maha=False)
+    assert bundle.get("maha") is None, "deployed demo bundle must ship NO Mahalanobis arrays"
+    black = Image.new("RGB", (224, 224), (0, 0, 0))
+    r = I.predict(black, bundle)
+    assert r["answer"] is False and ("dark" in r["reason"] or "flat" in r["reason"]), r["reason"]
+    # a bright, detailed fixture photo passes the handcrafted OOD gate (score below the handcrafted tau)
+    img = data.get_image(ds, 0)
+    r2 = I.predict(img, bundle)
+    assert r2["handcrafted_ood"] < bundle["handcrafted_tau"], (r2["handcrafted_ood"], bundle["handcrafted_tau"])
+    print("[inference] DEPLOYED handcrafted-only gate: abstains on black (%s), passes good photo OK" % r["reason"])
+
+
 if __name__ == "__main__":
     test_predict_and_gate()
     test_black_image_is_ood()
+    test_deployed_handcrafted_gate()
     print("\nALL INFERENCE/DEMO SMOKE CHECKS PASSED")

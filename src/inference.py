@@ -102,16 +102,18 @@ def predict(image, bundle) -> dict:
         point = float(apply_isotonic_knots([point], bundle["iso_x"], bundle["iso_y"])[0])
     aqi = float(max(point, 0.0))
 
-    # abstention: OOD (Mahalanobis if available, else handcrafted) then log-width uncertainty
+    # abstention: OOD (handcrafted deployed gate; Mahalanobis only if the bundle ships it) then log-width
     log_width = float(q_log[0, 2] - q_log[0, 0])
     hand = A.handcrafted_ood_score(rgb01)
     if bundle.get("maha") is not None:
         feats = net.backbone(xt).cpu().numpy()
         ood_score = float(A.mahalanobis_score(bundle["maha"], feats)[0])
         tau_ood = bundle["tau_ood"]
+        ood_reason = "out-of-distribution (far from training photos in feature space)"
     else:
         ood_score, tau_ood = hand, bundle.get("handcrafted_tau", 0.5)
-    gate = A.decide(ood_score, log_width, tau_ood, bundle["tau_width"])
+        ood_reason = A.handcrafted_reason(rgb01)          # "too dark (night)" or "too flat / featureless"
+    gate = A.decide(ood_score, log_width, tau_ood, bundle["tau_width"], ood_reason=ood_reason)
 
     cat = aqi_category(aqi)
     return {

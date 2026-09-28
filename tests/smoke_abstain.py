@@ -44,24 +44,36 @@ def test_handcrafted_flags_unusable():
     assert A.handcrafted_ood_score(flat) > 0.8, "flat image must score OOD"
     assert A.handcrafted_ood_score(good) < A.handcrafted_ood_score(black)
     assert A.brightness(black) < 0.05 and A.detail_variance(flat) < 1e-6
-    print("[abstain] handcrafted OOD flags black + flat images OK")
+    # components + human-readable reason (used by the demo badge)
+    dk, fl = A.handcrafted_components(black)
+    assert dk > 0.8 and "dark" in A.handcrafted_reason(black)
+    assert "flat" in A.handcrafted_reason(flat)
+    print("[abstain] handcrafted OOD flags black + flat images (+ named reasons) OK")
 
 
 def test_thresholds_and_gate_order():
     rng = np.random.default_rng(2)
+    # tau_ood = top-k rule: refuse at most `budget` of the good scores (robust to a spike at 0)
     cal_scores = rng.normal(5, 1, size=500)
     tau_ood = A.ood_threshold(cal_scores, false_refusal_budget=0.05)
-    assert abs(tau_ood - np.percentile(cal_scores, 95)) < 1e-9
+    rr = (cal_scores > tau_ood).mean()
+    assert rr <= 0.05 + 1e-9 and rr >= 0.03, rr                      # ~5% refused, never above budget
+    # the real handcrafted case: a distribution spiked at exactly 0 must still respect the budget
+    spiked = np.concatenate([np.zeros(950), rng.uniform(0.1, 1.0, 50)])
+    tau_sp = A.ood_threshold(spiked, 0.05)
+    assert (spiked > tau_sp).mean() <= 0.05 + 1e-9, "zero-spike must not over-refuse"
     cal_widths = rng.uniform(0.5, 2.0, size=500)
     tau_w = A.width_threshold(cal_widths, target_coverage=0.90)
     assert abs(tau_w - np.percentile(cal_widths, 90)) < 1e-9
     # gate order: OOD is checked before width
     assert A.decide(ood_score=99, log_width=0.1, tau_ood=tau_ood, tau_width=tau_w)["answer"] is False
     assert "out-of-distribution" in A.decide(99, 0.1, tau_ood, tau_w)["reason"]
+    # a caller-supplied reason (the demo's specific trigger) is passed through
+    assert A.decide(99, 0.1, tau_ood, tau_w, ood_reason="too dark (night)")["reason"] == "too dark (night)"
     assert A.decide(0.0, 99, tau_ood, tau_w)["answer"] is False       # uncertainty gate
     assert "uncertain" in A.decide(0.0, 99, tau_ood, tau_w)["reason"]
     assert A.decide(0.0, 0.1, tau_ood, tau_w)["answer"] is True       # confident + in-dist
-    print("[abstain] thresholds cal-only; gate checks OOD before width OK")
+    print("[abstain] thresholds cal-only (top-k budget, zero-spike safe); gate OOD-before-width OK")
 
 
 def test_risk_coverage_and_aurc():

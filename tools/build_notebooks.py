@@ -1221,22 +1221,52 @@ if not os.path.exists(ckpt):
 T.load_checkpoint(ckpt, net, map_location=device)
 print("model ready:", ckpt)"""),
 
-    ("md", """## 2 — Fit the two gates on calibration (no test/OOD data used)
+    ("md", """## 2 — Fit the two gates
 
-Mahalanobis on cal-good backbone features -> `tau_ood` (5% false-refusal budget); cal log-widths ->
-`tau_width` (target 90% coverage). Also fit isotonic + conformal Q so we can score test errors."""),
+**OOD gate = interpretable, station-invariant checks (too dark = night, too flat = featureless).** A
+feature-space Mahalanobis detector conflates *unseen station* (benign) with *unusable photo*, so it
+over-refuses valid test photos — we show that below with a **confound-controlled** comparison and deploy
+the robust handcrafted score as the gate. The 5% false-refusal budget is **fit on one slice of held-out
+good unseen-station photos (`good_fit`) and reported on a disjoint slice (`good_eval`)**, so "~5% refused"
+is a real held-out check, not true by construction. Handcrafted scores use the **224 px serve-time
+resolution** (matching the demo). **Uncertainty gate = log interval width**, `tau_width` from cal."""),
     ("code", """cal = T.collect_outputs(net, loaders["cal"], device)
 test = T.collect_outputs(net, loaders["test"], device)
 cal_feats = T.collect_features(net, loaders["cal"], device)["feats"]
+test_feats = T.collect_features(net, loaders["test"], device)["feats"]
 
 ymean, ystd = float(net.y_mean), float(net.y_std)
 iso = R.fit_isotonic(T.point_to_aqi(cal["point_out"], ymean, ystd), cal["y_raw"])
 Q = C.conformal_Q(np.exp(cal["q_log"]), cal["y_raw"], cfg["calibration"]["coverage"])
-
-maha = A.fit_mahalanobis(cal_feats)
-tau_ood = A.ood_threshold(A.mahalanobis_score(maha, cal_feats), false_refusal_budget=0.05)
 tau_width = A.width_threshold(A.log_interval_width(cal["q_log"]), target_coverage=0.90)
-print("tau_ood = %.2f  |  tau_width = %.3f (log-AQI)" % (tau_ood, tau_width))
+
+# --- OOD gate (DEPLOYED): handcrafted score on real test photos, at the 224px serve-time resolution ---
+def hand_scores(rows, size=224):     # 224 = what physics.compute_maps produces at serve time (demo)
+    return np.array([A.handcrafted_ood_score(np.asarray(data.get_image(ds, int(r)).resize((size, size)))/255.0)
+                     for r in rows])
+# split the UNSEEN test stations into two disjoint halves: FIT tau_ood on one, REPORT the budget on the other
+test_sp = sp[sp["split"] == "test"]; stcol = cfg["data"]["station_col"]
+_st = np.array(sorted(test_sp[stcol].unique()))
+_perm = np.random.default_rng(cfg["seed"]).permutation(len(_st))
+_fit_st = set(_st[_perm[: max(1, len(_st) // 2)]])
+good_fit_rows  = test_sp.loc[ test_sp[stcol].isin(_fit_st), "_row"].to_numpy()[:1000]
+good_eval_rows = test_sp.loc[~test_sp[stcol].isin(_fit_st), "_row"].to_numpy()[:1000]
+good_fit_hand, test_hand = hand_scores(good_fit_rows), hand_scores(good_eval_rows)  # test_hand = held-out good_eval
+tau_ood = A.ood_threshold(good_fit_hand, false_refusal_budget=0.05)                 # <-- the gate the demo uses
+zero_frac = float((np.concatenate([good_fit_hand, test_hand]) == 0).mean())
+
+# --- Mahalanobis, REPORTED ONLY: fit on a cal slice, threshold on a HELD-OUT same-station cal slice, ---
+# --- then refuse on unseen-station test. The EXCESS over the same-station holdout = genuine station shift. ---
+_ci = np.random.default_rng(cfg["seed"] + 1).permutation(len(cal_feats)); _h = len(_ci) // 2
+maha = A.fit_mahalanobis(cal_feats[_ci[:_h]])
+maha_hold = A.mahalanobis_score(maha, cal_feats[_ci[_h:]])          # same-station holdout (not used to fit)
+tau_maha = A.ood_threshold(maha_hold, 0.05)
+test_maha = A.mahalanobis_score(maha, test_feats)
+print("tau_ood (handcrafted, 5%% budget, fit on good_fit) = %.3f  |  tau_width = %.3f (log-AQI)" % (tau_ood, tau_width))
+print("handcrafted refuse-rate on held-out good_eval = %.3f  (a REAL 5%% check; %.0f%% of good scores are exactly 0)"
+      % (A.refuse_rate(test_hand, tau_ood), 100 * zero_frac))
+print("Mahalanobis refuse-rate: same-station holdout %.3f (~budget)  vs unseen test %.3f  <-- EXCESS = station shift"
+      % (A.refuse_rate(maha_hold, tau_maha), A.refuse_rate(test_maha, tau_maha)))
 
 # test-set point, intervals, per-photo error + log-width (the uncertainty signal)
 test_point = R.apply_isotonic(iso, T.point_to_aqi(test["point_out"], ymean, ystd))
@@ -1245,100 +1275,135 @@ test_err = np.abs(test_point - test["y_raw"])
 test_width = A.log_interval_width(test["q_log"])"""),
 
     ("md", """## 3 — Selective prediction: risk–coverage + AURC (refusing the unsure photos helps)"""),
-    ("code", """cov, risk = A.risk_coverage_curve(test_width, test_err)
-aurc = A.aurc(test_width, test_err); e_aurc = A.excess_aurc(test_width, test_err)
-rand_aurc = A.aurc(np.random.default_rng(0).permutation(test_width), test_err)
-print("AURC (log-width) = %.2f  |  excess-AURC vs oracle = %.2f  |  random-signal AURC = %.2f"
-      % (aurc, e_aurc, rand_aurc))
+    ("code", """rand_aurc = A.aurc(np.random.default_rng(0).permutation(test_width), test_err)
+raw_width = test_iv[:, 2] - test_iv[:, 0]
+print("AURC by confidence signal (lower is better):")
+print("  log interval width : %.2f   <-- DEPLOYED signal (what the gate + demo actually use)" % A.aurc(test_width, test_err))
+print("  raw AQI width      : %.2f   (DIAGNOSTIC only: level-driven, refuses high-AQI which ARE harder)" % A.aurc(raw_width, test_err))
+print("  random refusal     : %.2f   (no-skill baseline)" % rand_aurc)
+print("  oracle (true error): %.2f   (perfect confidence, unreachable)" % A.aurc(test_err, test_err))
+# HEADLINE selective-prediction uses the DEPLOYED log-width signal (report == deploy). Honest finding: on
+# this hard task log-width is a WEAK error predictor (close to random); raw width scores lower only because
+# high-AQI photos are both wider AND harder -- we show it as a labelled diagnostic, never as the headline.
+# The OOD gate (step 4) is C3's main practical value, not the uncertainty gate.
+sig = test_width
+aurc_val = A.aurc(sig, test_err); e_aurc = A.excess_aurc(sig, test_err)
+cov, risk = A.risk_coverage_curve(sig, test_err)
+print("selective prediction on the DEPLOYED log-width signal:")
 for c in (0.90, 0.80, 0.70):
-    m = A.selective_metrics_at_coverage(test_width, test["y_raw"], test_point, test_iv, c)
+    m = A.selective_metrics_at_coverage(sig, test["y_raw"], test_point, test_iv, c)
     print("  @%.0f%% coverage: MAE %.1f  RMSE %.1f  cat-acc %.2f  interval-cov %.2f"
           % (c*100, m["MAE"], m["RMSE"], m["category_accuracy"], m["interval_coverage"]))
 plt.figure(figsize=(6,4)); plt.plot(cov, risk); plt.xlabel("coverage (fraction answered)")
-plt.ylabel("selective MAE (AQI)"); plt.title("Risk–coverage (lower-left is better)")
+plt.ylabel("selective MAE (AQI)"); plt.title("Risk-coverage, log-width gate (lower-left is better)")
 plt.savefig(os.path.join(out_root, "risk_coverage.png"), dpi=120, bbox_inches="tight"); plt.show()"""),
 
     ("md", """## 4 — Attach the OOD sets, then measure the OOD gate
 
-Add these as **Kaggle datasets** (⋮ → Add Input) and set their folders below; any set that's missing is
-skipped. **ExDark** (night, far-OOD), **DTD** textures (featureless, far-OOD), **MIT-Indoor** (indoor,
-near-OOD). Every image goes through the SAME `physics.five_channel` pipeline as a real photo."""),
-    ("code", """OOD_DIRS = {   # edit to match your attached datasets
-    "ExDark":     "/kaggle/input/exdark",
-    "DTD":        "/kaggle/input/dtd/dtd/images",
-    "MIT-Indoor": "/kaggle/input/mit-indoor-scenes/indoorCVPR_09/Images",
+**Add these as Kaggle datasets** (⋮ Add Input, search the name, Add). The folders are **auto-discovered**
+under `/kaggle/input`, so you don't need to fix paths — just attach them:
+- **ExDark** (night / low-light) — far-OOD. e.g. search *"Exclusively Dark Image Dataset"* / *ExDark*.
+- **DTD** describable textures (featureless) — far-OOD. search *"Describable Textures Dataset DTD"*.
+- **MIT-Indoor** (indoor scenes) — near-OOD. search *"Indoor Scenes CVPR 2019"*.
+
+Each image goes through the SAME `physics.five_channel` pipeline as a real photo. If a set prints
+MISSING, attach it and re-run this cell.
+
+> **Expect this honestly:** the deployed handcrafted gate should score **near-chance on MIT-Indoor** — a
+> lit indoor photo is bright and detailed, so `max(dark, flat)` does not fire. Indoor is a *documented
+> limitation*; the reported Mahalanobis catches it better but over-refuses valid unseen-station outdoor
+> photos (that is exactly the tradeoff we quantify)."""),
+    ("code", """import glob as _g
+CANDIDATES = {   # folders are auto-discovered under /kaggle/input by these glob patterns
+    "ExDark":     ["/kaggle/input/*exdark*", "/kaggle/input/*exclusively-dark*"],
+    "DTD":        ["/kaggle/input/*dtd*/**/images", "/kaggle/input/*describable-textures*/**/images", "/kaggle/input/*dtd*"],
+    "MIT-Indoor": ["/kaggle/input/*indoor*/**/Images", "/kaggle/input/*indoorCVPR*", "/kaggle/input/*indoor-scenes*"],
 }
 NEAR_OOD = {"MIT-Indoor"}   # indoor is 'near' OOD (still a photo); night/textures are 'far'
 
+def find_dir(patterns):
+    for p in patterns:
+        if os.path.isdir(p): return p
+        hits = [h for h in _g.glob(p, recursive=True) if os.path.isdir(h)]
+        if hits: return hits[0]
+    return None
+
 def load_images(d, limit=300):
-    if not d or not os.path.isdir(d):
-        return []
+    if not d: return []
     files = []
-    for e in ("*.jpg","*.jpeg","*.png","*.JPEG","*.JPG","*.ppm"):
-        files += glob.glob(os.path.join(d, "**", e), recursive=True)
-    files = sorted(files)[:limit]
-    out = []
-    for f in files:
-        try: out.append(Image.open(f).convert("RGB"))
+    for e in ("*.jpg","*.jpeg","*.png","*.JPEG","*.JPG","*.ppm","*.bmp"):
+        files += _g.glob(os.path.join(d, "**", e), recursive=True)
+    imgs = []
+    for f in sorted(files)[:limit]:
+        try: imgs.append(Image.open(f).convert("RGB"))
         except Exception: pass
-    return out
+    return imgs
 
 @torch.no_grad()
-def ood_scores_for(images):
-    net.eval(); scores = []
+def scores_for(images):   # returns (Mahalanobis feature scores, handcrafted scores) per image
+    net.eval(); mh, hd = [], []
     for im in images:
         x = torch.from_numpy(physics.five_channel(im))[None].to(device)
-        scores.append(A.mahalanobis_score(maha, net.backbone(x).cpu().numpy())[0])
-    return np.array(scores)
+        mh.append(A.mahalanobis_score(maha, net.backbone(x).cpu().numpy())[0])
+        hd.append(A.handcrafted_ood_score(np.asarray(im.resize((224, 224)))/255.0))   # 224 = serve-time size
+    return np.array(mh), np.array(hd)
 
-# in-distribution reference = the real test photos' Mahalanobis scores
-id_scores = A.mahalanobis_score(maha, T.collect_features(net, loaders["test"], device)["feats"])
-print("loaded ID (test) photos:", len(id_scores))"""),
+print("in-distribution reference: %d held-out good_eval photos" % len(test_hand))"""),
 
-    ("code", """rows = [{"set": "PM25Vision-good (test)", "n": len(id_scores),
-         "refuse_rate": round(A.refuse_rate(id_scores, tau_ood), 3), "kind": "in-distribution"}]
-per_set_scores = {}
-for name, d in OOD_DIRS.items():
-    imgs = load_images(d)
+    ("code", """rows = [{"set": "PM25Vision-good (good_eval)", "n": len(test_hand),
+         "refuse (handcrafted)": round(A.refuse_rate(test_hand, tau_ood), 3), "kind": "in-distribution"}]
+maha_sets, hand_sets = {}, {}
+for name, pats in CANDIDATES.items():
+    d = find_dir(pats); imgs = load_images(d)
     if not imgs:
-        print("skip", name, "(no images at", d, ")"); continue
-    s = ood_scores_for(imgs); per_set_scores[name] = s
-    rows.append({"set": name, "n": len(s), "refuse_rate": round(A.refuse_rate(s, tau_ood), 3),
+        print("MISSING:", name, "- attach the dataset then re-run (searched", pats[0], ")"); continue
+    print("found", name, "->", d, "(%d images)" % len(imgs))
+    mh, hd = scores_for(imgs); maha_sets[name] = mh; hand_sets[name] = hd
+    rows.append({"set": name, "n": len(imgs), "refuse (handcrafted)": round(A.refuse_rate(hd, tau_ood), 3),
                  "kind": ("near-OOD" if name in NEAR_OOD else "far-OOD")})
 refuse_tbl = pd.DataFrame(rows); display(refuse_tbl)
 
-ood_summary = {}
-if per_set_scores:
-    all_ood = np.concatenate(list(per_set_scores.values()))
-    ood_summary["all"] = A.ood_metrics(id_scores, all_ood)
-    far = [s for k,s in per_set_scores.items() if k not in NEAR_OOD]
-    near = [s for k,s in per_set_scores.items() if k in NEAR_OOD]
-    if far:  ood_summary["far"]  = A.ood_metrics(id_scores, np.concatenate(far))
-    if near: ood_summary["near"] = A.ood_metrics(id_scores, np.concatenate(near))
-    for k,v in ood_summary.items():
-        print("OOD %-5s: AUROC %.3f  AUPR %.3f  FPR@95 %.3f  (n_ood=%d)"
-              % (k, v["AUROC"], v["AUPR"], v["FPR@95TPR"], v["n_ood"]))
-else:
-    print("No OOD sets attached — selective-prediction results (step 3) still stand.")"""),
+def summarize(id_s, sets, label):
+    if not sets: print("  (no OOD sets attached for", label + ")"); return {}
+    out = {"all": A.ood_metrics(id_s, np.concatenate(list(sets.values())))}
+    far = [s for k, s in sets.items() if k not in NEAR_OOD]; near = [s for k, s in sets.items() if k in NEAR_OOD]
+    if far:  out["far"]  = A.ood_metrics(id_s, np.concatenate(far))
+    if near: out["near"] = A.ood_metrics(id_s, np.concatenate(near))
+    for k, v in out.items():
+        print("  %-4s %-4s: AUROC %.3f  AUPR %.3f  FPR@95 %.3f  (n_ood=%d)"
+              % (label, k, v["AUROC"], v["AUPR"], v["FPR@95TPR"], v["n_ood"]))
+    return out
+
+print("=== OOD detection (higher AUROC = better; the two detectors compared) ===")
+ood_hand = summarize(test_hand, hand_sets, "hand")     # station-invariant, our gate
+ood_maha = summarize(test_maha, maha_sets, "maha")     # feature-space, reported for comparison"""),
 
     ("md", """## 5 — Save results + the demo bundle"""),
-    ("code", """results = {"tau_ood": tau_ood, "tau_width": tau_width, "AURC": aurc, "excess_AURC": e_aurc,
-           "random_AURC": rand_aurc, "refuse_rates": refuse_tbl.to_dict(orient="records"),
-           "ood_metrics": ood_summary}
+    ("code", """results = {"tau_ood_handcrafted": tau_ood, "tau_width": tau_width, "zero_frac_good": zero_frac,
+           "AURC_logwidth": aurc_val, "excess_AURC": e_aurc, "random_AURC": rand_aurc,
+           "refuse_rates": refuse_tbl.to_dict(orient="records"),
+           "ood_handcrafted": ood_hand, "ood_mahalanobis": ood_maha}
 json.dump(results, open(os.path.join(out_root, "abstention_results.json"), "w"), indent=2, default=float)
 
-# the demo bundle: checkpoint + Q/stats/isotonic + thresholds + Mahalanobis (see docs/11_demo.md)
+# the demo bundle uses the STATION-INVARIANT handcrafted OOD gate (maha=None -> inference.predict
+# falls back to the handcrafted score with handcrafted_tau). See docs/11_demo.md.
 bundle_dir = os.path.join(out_root, "demo_bundle"); os.makedirs(bundle_dir, exist_ok=True)
 import shutil; shutil.copy(ckpt, os.path.join(bundle_dir, "best_model.pth"))
-Inf.save_bundle(bundle_dir, net, Q, ymean, ystd, iso, tau_ood, tau_width, maha=maha)
+Inf.save_bundle(bundle_dir, net, Q, ymean, ystd, iso, tau_ood, tau_width, maha=None, handcrafted_tau=tau_ood)
 print("saved:", os.path.join(out_root, "abstention_results.json"))
 print("demo bundle ->", bundle_dir, ":", os.listdir(bundle_dir))"""),
 
     ("md", """## Done — paste me the numbers
 
-Paste the **risk–coverage/AURC** line, the **selective metrics at 90/80/70%**, and the **OOD table**
-(refuse-rates + AUROC/FPR95, near vs far). Then **Save Version** and download `demo_bundle/` from the
-Output tab for the live demo (`docs/11_demo.md`)."""),
+Paste: (1) the **AURC-by-signal** block + the **selective metrics at 90/80/70%** (headline = log width);
+(2) the **refuse-rate table** (handcrafted ~0.05 on the held-out `good_eval`, high on the *far*-OOD sets,
+and honestly low on MIT-Indoor — the documented near-OOD limitation); (3) the **OOD-detection block**
+(AUROC/AUPR/FPR95 for handcrafted vs Mahalanobis, near vs far) + the Mahalanobis **same-station-holdout vs
+unseen-test** refuse line. Then **Save Version** and download `demo_bundle/` from the Output tab for the
+live demo (`docs/11_demo.md`).
+
+> If any OOD set prints MISSING, attach it (⋮ Add Input) and re-run step 4 — you do **not** need to
+> retrain; the model and thresholds are already computed."""),
 ]
 
 if __name__ == "__main__":
