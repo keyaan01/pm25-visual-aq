@@ -1300,39 +1300,57 @@ plt.savefig(os.path.join(out_root, "risk_coverage.png"), dpi=120, bbox_inches="t
 
     ("md", """## 4 — Attach the OOD sets, then measure the OOD gate
 
-**Add these as Kaggle datasets** (⋮ Add Input, search the name, Add). The folders are **auto-discovered**
-under `/kaggle/input`, so you don't need to fix paths — just attach them:
+**Add these as Kaggle datasets** (⋮ Add Input, search the name, Add):
 - **ExDark** (night / low-light) — far-OOD. e.g. search *"Exclusively Dark Image Dataset"* / *ExDark*.
 - **DTD** describable textures (featureless) — far-OOD. search *"Describable Textures Dataset DTD"*.
 - **MIT-Indoor** (indoor scenes) — near-OOD. search *"Indoor Scenes CVPR 2019"*.
 
-Each image goes through the SAME `physics.five_channel` pipeline as a real photo. If a set prints
-MISSING, attach it and re-run this cell.
+The cell below **prints every folder under `/kaggle/input` with its image count**, then finds each set by a
+**case-insensitive keyword anywhere in the path** (any uploader, any nesting, any file-name casing — it does
+NOT need an `images/` subfolder). If a set still says MISSING, copy one of the printed paths into the
+`MANUAL` dict at the top of the cell (e.g. `MANUAL["DTD"] = "/kaggle/input/..."`) and re-run **just this
+cell** — no retrain, the model is already loaded. Each image goes through the SAME `physics.five_channel`
+pipeline as a real photo.
 
 > **Expect this honestly:** the deployed handcrafted gate should score **near-chance on MIT-Indoor** — a
 > lit indoor photo is bright and detailed, so `max(dark, flat)` does not fire. Indoor is a *documented
 > limitation*; the reported Mahalanobis catches it better but over-refuses valid unseen-station outdoor
 > photos (that is exactly the tradeoff we quantify)."""),
     ("code", """import glob as _g
-CANDIDATES = {   # folders are auto-discovered under /kaggle/input by these glob patterns
-    "ExDark":     ["/kaggle/input/*exdark*", "/kaggle/input/*exclusively-dark*"],
-    "DTD":        ["/kaggle/input/*dtd*/**/images", "/kaggle/input/*describable-textures*/**/images", "/kaggle/input/*dtd*"],
-    "MIT-Indoor": ["/kaggle/input/*indoor*/**/Images", "/kaggle/input/*indoorCVPR*", "/kaggle/input/*indoor-scenes*"],
-}
-NEAR_OOD = {"MIT-Indoor"}   # indoor is 'near' OOD (still a photo); night/textures are 'far'
+IMG_EXTS = (".jpg", ".jpeg", ".png", ".ppm", ".bmp", ".gif", ".webp", ".tif", ".tiff")  # case-insensitive
 
-def find_dir(patterns):
-    for p in patterns:
-        if os.path.isdir(p): return p
-        hits = [h for h in _g.glob(p, recursive=True) if os.path.isdir(h)]
-        if hits: return hits[0]
-    return None
+def _img_count(root):
+    n = 0
+    for _dp, _dn, fns in os.walk(root):
+        n += sum(f.lower().endswith(IMG_EXTS) for f in fns)
+        if n > 5000: break                       # enough to know it's an image folder
+    return n
+
+# 1) Show EXACTLY what is mounted, with image counts -- so a MISSING is never a mystery.
+ROOTS = sorted(p for p in _g.glob("/kaggle/input/*") if os.path.isdir(p))
+print("Attached under /kaggle/input  (folder -> #images):")
+for r in ROOTS:
+    print("   %-52s %d" % (os.path.basename(r), _img_count(r)))
+
+# 2) Match each OOD set by keyword ANYWHERE in the mounted path (case-insensitive), choosing the matching
+#    folder with the MOST images. Slug-agnostic AND subfolder-agnostic -- no exact paths, no 'images/' needed.
+KEYWORDS = {
+    "ExDark":     ("exdark", "exclusively", "lowlight", "low-light", "dark"),
+    "DTD":        ("dtd", "describable", "texture"),
+    "MIT-Indoor": ("indoor", "cvpr", "mitindoor"),
+}
+NEAR_OOD = {"MIT-Indoor"}          # indoor is 'near' OOD (still a photo); night/textures are 'far'
+MANUAL = {}                        # ESCAPE HATCH: if a set still misses, paste a path printed above, e.g.
+                                   #   MANUAL["DTD"] = "/kaggle/input/describable-textures-dataset/dtd"
+
+def find_dir(name):
+    if MANUAL.get(name): return MANUAL[name]
+    cands = [r for r in ROOTS if any(k in r.lower() for k in KEYWORDS[name]) and _img_count(r) > 0]
+    return max(cands, key=_img_count) if cands else None
 
 def load_images(d, limit=300):
     if not d: return []
-    files = []
-    for e in ("*.jpg","*.jpeg","*.png","*.JPEG","*.JPG","*.ppm","*.bmp"):
-        files += _g.glob(os.path.join(d, "**", e), recursive=True)
+    files = [f for f in _g.glob(os.path.join(d, "**", "*"), recursive=True) if f.lower().endswith(IMG_EXTS)]
     imgs = []
     for f in sorted(files)[:limit]:
         try: imgs.append(Image.open(f).convert("RGB"))
@@ -1353,10 +1371,11 @@ print("in-distribution reference: %d held-out good_eval photos" % len(test_hand)
     ("code", """rows = [{"set": "PM25Vision-good (good_eval)", "n": len(test_hand),
          "refuse (handcrafted)": round(A.refuse_rate(test_hand, tau_ood), 3), "kind": "in-distribution"}]
 maha_sets, hand_sets = {}, {}
-for name, pats in CANDIDATES.items():
-    d = find_dir(pats); imgs = load_images(d)
+for name in KEYWORDS:
+    d = find_dir(name); imgs = load_images(d)
     if not imgs:
-        print("MISSING:", name, "- attach the dataset then re-run (searched", pats[0], ")"); continue
+        print("MISSING:", name, "-> no attached folder matched", KEYWORDS[name],
+              "| set MANUAL['%s'] = one of the paths above and re-run this cell" % name); continue
     print("found", name, "->", d, "(%d images)" % len(imgs))
     mh, hd = scores_for(imgs); maha_sets[name] = mh; hand_sets[name] = hd
     rows.append({"set": name, "n": len(imgs), "refuse (handcrafted)": round(A.refuse_rate(hd, tau_ood), 3),

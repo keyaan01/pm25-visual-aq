@@ -51,7 +51,16 @@ limitation; see [`docs/09_abstention.md`](09_abstention.md).)
 
 ## What viewers see
 
-- **AQI ≈ N** and the **90% range** `low – high` (never a bare number — the honesty point).
+The page is built to make the **three honesty guarantees** visible to a viewer (or a professor):
+
+- **AQI ≈ N** and the **calibrated 90% interval** `low – high` — never a bare number (**C1**).
 - The **EPA category** chip in its official colour.
-- **✅ ANSWER** or **🚫 ABSTAIN** with the reason (out-of-distribution vs too-uncertain).
+- A **C2 reality-check line**: the interval's width vs the **~35 AQI physical floor** (daily-average label
+  noise), so a wide interval reads as honesty about a hard task, not a bug.
+- **✅ ANSWER** or **🚫 ABSTAIN** with the reason — too dark (night) / too flat (featureless) vs
+  too-uncertain (**C3**).
 - **Transmission** (dark = more haze) and **inverted saturation** (bright = hazy) maps — the physics.
+- Two collapsible panels: **"Why a range, not a single number?"** (the C2 ceiling story) and **"Project
+  results at a glance"** (honest 0.22/0.385 vs leaky 0.55/0.76 vs the 0.98 ceiling).
+
+The static panels render even before the model bundle is added, so the page is presentable in "demo mode."
