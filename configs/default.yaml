@@ -45,18 +45,21 @@ train:                                  # optimisation (paper Sec 3.12)
   warmup_epochs: 2
   early_stop_patience: 10              # raised (Phase 5b)
   amp: true                            # mixed precision
-  log_target: true                     # train on log(AQI), invert at prediction (paper Sec 3.7)
+  log_target: true                     # FIXED/inert: the quantile heads always train on log(AQI)
+                                       #   (hardcoded in losses.combined_loss); this knob is not read.
   point_loss_weight: 1.0               # weight of the point loss vs the pinball loss (Phase 5b)
   point_loss: mse                      # mse = estimate the MEAN (good R²); huber = robust/median (was the R² bug)
   huber_delta: 1.0                     # only used when point_loss=huber (standardised z-score units)
   balanced_sampling: true              # oversample rare high-AQI photos in TRAIN only (Phase 5b)
   balance_power: 1.0                   # 0 = natural, 1 = full inverse-frequency (strong; targets the rare high-AQI tail)
   recalibrate: true                    # isotonic recalibration of the point estimate on cal (removes tail bias)
-  early_stop_metric: cal_point_mae     # documents the fixed behaviour: early stop on calibration point-MAE
-  # --- Stage B/C (added when we get there) ---
-  ema: false                           # exponential moving average of weights (Stage B)
-  tta: false                           # test-time augmentation at eval (Stage B)
-  ensemble_seeds: [42]                 # seeds to train + average for the ensemble (Stage C)
+  early_stop_metric: cal_point_mae     # FIXED/inert: early stopping is always on calibration point-MAE
+                                       #   (hardcoded in train.train_model); this knob only documents it.
+  # --- Stage B/C accuracy levers (now IMPLEMENTED — flip to enable; all selected on cal, test once) ---
+  ema: false                           # exponential moving average of weights (train.train_model)
+  ema_decay: 0.999                     # EMA decay when ema=true
+  tta: false                           # horizontal-flip test-time augmentation on cal+test (train.collect_outputs)
+  ensemble_seeds: [42]                 # >1 seed => train one model per seed on the SAME split + average (leakage.train_and_evaluate)
 
 calibration:                            # Conformalized Quantile Regression (paper Sec 3.8)
   coverage: 0.90                       # target: true value inside interval >= 90% of the time

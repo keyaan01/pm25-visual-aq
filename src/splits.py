@@ -116,6 +116,15 @@ def make_splits(
         for j, g in zip(train_idx, grp):
             lab[j] = "cal" if g == "cal" else "train"
         out["split"] = lab
+        # The shipped split is only leakage-safe if the paper's test stations never appear in
+        # train/cal. We ENFORCE that here (raise) rather than merely reporting straddling after the
+        # fact — a silent straddle would quietly contaminate the "honest reference" number.
+        _test_stn = set(out.loc[out["split"] == "test", station_col])
+        _nontest_stn = set(out.loc[out["split"] != "test", station_col])
+        _straddle = _test_stn & _nontest_stn
+        assert not _straddle, (
+            f"shipped split is NOT station-disjoint: {len(_straddle)} station(s) are in both the "
+            f"shipped test and train/cal, which would leak (e.g. {list(_straddle)[:3]}).")
     elif strategy == "temporal":
         order = out[time_col].astype("datetime64[ns]").argsort(kind="stable").to_numpy()
         n = len(out)

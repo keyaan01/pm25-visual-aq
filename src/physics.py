@@ -200,6 +200,40 @@ def load_map_cache(path):
     return np.load(path, mmap_mode="r")
 
 
+def verify_cache_alignment(cache, get_image, n_total, n_samples=8, size=224, patch=15,
+                           omega=0.95, top_frac=0.001, t_min=0.05, tol=6.0, seed=0) -> dict:
+    """Spot-check that `cache[row]` really is the physics map of image `row` (alignment guard).
+
+    `five_channel_cached` guards the cache LENGTH per-row, but a cache built from a DIFFERENTLY
+    ORDERED dataset reload would have the right length yet the wrong rows — silently mispairing maps
+    with images. Here we recompute the transmission + inverted-saturation maps for a few random rows
+    and compare them to the cached uint8 maps; a large mean absolute difference means the cache does
+    not match this `get_image`/dataset build. Cheap (a handful of rows), so it can gate a run.
+
+    Returns {"ok", "checked", "max_mean_abs_diff", "worst_row"}; raises AssertionError if misaligned.
+    """
+    assert cache.shape[0] == n_total, (
+        f"cache length {cache.shape[0]} != dataset length {n_total} — the cache must be built with "
+        "n=len(ds) (the pooled size), because `_row` indexes the full pooled dataset.")
+    rng = np.random.default_rng(seed)
+    rows = rng.choice(n_total, size=min(n_samples, n_total), replace=False)
+    worst, worst_row = 0.0, -1
+    for row in rows:
+        row = int(row)
+        _, t, s = compute_maps(get_image(row), size, patch, omega, top_frac, t_min)
+        cached_t = cache[row, 0].astype(np.float32)
+        cached_s = cache[row, 1].astype(np.float32)
+        diff = 0.5 * (np.abs(t * 255.0 - cached_t).mean() + np.abs(s * 255.0 - cached_s).mean())
+        if diff > worst:
+            worst, worst_row = float(diff), row
+    ok = worst <= tol
+    assert ok, (
+        f"physics cache misaligned: row {worst_row} recomputed maps differ from the cache by "
+        f"{worst:.1f} (>{tol}) in 0-255 units — the cache was likely built from a different dataset "
+        "order. Rebuild the cache from the SAME load_clean/ds build used for this run.")
+    return {"ok": ok, "checked": int(len(rows)), "max_mean_abs_diff": worst, "worst_row": worst_row}
+
+
 def five_channel_cached(img, cache, row, size=224, imagenet_norm=True) -> np.ndarray:
     """Assemble the 5-channel input using cached maps (fast path for training).
 

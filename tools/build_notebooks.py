@@ -581,7 +581,7 @@ split strategy, compare them side by side to expose the leakage gap."""),
     ("code", """import os, json, numpy as np, matplotlib.pyplot as plt
 from src.config import load_config
 from src import data, splits, physics, dataset as D, model as M, train as T
-from src import calibrate as C, metrics as Mx
+from src import calibrate as C, metrics as Mx, recalibrate as R
 cfg = load_config()
 device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
 
@@ -606,11 +606,17 @@ def evaluate_strategy(strategy):
     loaders = D.make_dataloaders(ds, sp, cache, cfg, num_workers=2)
     net = M.build_model(cfg).to(device)
     T.load_checkpoint(os.path.join(out_root, strategy, "best_model.pth"), net, map_location=device)
-    cal = T.collect_outputs(net, loaders["cal"], device)
-    test = T.collect_outputs(net, loaders["test"], device)
-    # accuracy: de-standardised point head
+    tta = bool(cfg["train"].get("tta", False))
+    cal = T.collect_outputs(net, loaders["cal"], device, tta=tta)
+    test = T.collect_outputs(net, loaders["test"], device, tta=tta)
+    # accuracy: de-standardised point head, then isotonic recalibration fit on CAL only (applied to
+    # test, never fit on test). This MATCHES the headline leakage/CV path (src/leakage.py); without
+    # it, this notebook's R2 would not match docs/RESULTS.md.
     ymean, ystd = float(net.y_mean), float(net.y_std)
     point = T.point_to_aqi(test["point_out"], ymean, ystd)
+    if cfg["train"].get("recalibrate", True):
+        iso = R.fit_isotonic(T.point_to_aqi(cal["point_out"], ymean, ystd), cal["y_raw"])
+        point = R.apply_isotonic(iso, point)
     # intervals: conformal-calibrated quantiles
     Q = C.conformal_Q(np.exp(cal["q_log"]), cal["y_raw"], cfg["calibration"]["coverage"])
     intervals = C.apply_conformal(np.exp(test["q_log"]), Q)
@@ -709,12 +715,14 @@ honest R²=0.22 (and whether the published R²=0.55 is even physically attainabl
     ("code", """OPENAQ_API_KEY = "PASTE_YOUR_OPENAQ_KEY_HERE"   # <-- from explore.openaq.org
 assert OPENAQ_API_KEY != "PASTE_YOUR_OPENAQ_KEY_HERE", "Add your OpenAQ API key first." """),
 
-    ("md", """## Fetch hourly PM2.5 from a region-stratified sample of stations
+    ("md", """## Fetch hourly PM2.5 from a region- AND AQI-level-stratified sample of stations
 
 We pull ~80 stations' hourly readings over a recent 60-day window, **capping stations per country**
-so the sample spreads across regions (not dominated by whichever country OpenAQ lists first) and
-covers a range of pollution levels. Exact matching to PM25Vision's stations isn't needed — we want a
-defensible estimate of the within-day AQI variance *curve* across levels."""),
+so the sample spreads across regions, AND giving high-pollution countries (India, Pakistan, … — see
+`ceiling.HIGH_AQI_COUNTRIES`) a **higher cap** so the sample deliberately reaches the HIGH-AQI bands.
+This matters: the within-day swing is largest at high AQI, so a sample that misses those bands makes
+the ceiling look *too high*. Exact matching to PM25Vision's stations isn't needed — we want a
+defensible within-day AQI variance *curve* across levels, with the high bands actually covered."""),
     ("code", """import datetime as dt
 from src import ceiling as CE
 to = dt.date.today()
@@ -747,16 +755,26 @@ var_labels = float(np.var(sp.loc[sp["split"] == "test", "pm25"].to_numpy()))
 dataset_labels = df["pm25"].to_numpy()
 
 res = CE.compute_ceiling(hourly, dataset_labels, var_labels, min_hours=18, n_boot=1000)
-print("Var(eps) level-reweighted:        %.1f  (std ~ %.1f AQI)" % (res["var_epsilon"], res["var_epsilon"]**0.5))
-print("Var(y) station-grouped test:      %.1f  (SD  ~ %.1f AQI)" % (var_labels, var_labels**0.5))
+print("Var(eps) level-reweighted (optimistic):   %.1f  (std ~ %.1f AQI)" % (res["var_epsilon"], res["var_epsilon"]**0.5))
+if "var_epsilon_conservative" in res:
+    print("Var(eps) conservative (impute high bands): %.1f  (std ~ %.1f AQI)"
+          % (res["var_epsilon_conservative"], res["var_epsilon_conservative"]**0.5))
+print("Var(y) station-grouped test:               %.1f  (SD  ~ %.1f AQI)" % (var_labels, var_labels**0.5))
 print("--------")
-print("R2_max (UPPER bound, label noise only): %.3f  [95%% CI %.3f - %.3f]"
-      % (res["R2_max"], res["R2_max_lo"], res["R2_max_hi"]))
-print("honest R2 we measured (station-grouped): 0.220   |   published baseline: 0.550")
+# Report R2_max as an HONEST RANGE, not one fragile number. The optimistic end drops any high-AQI
+# band the sample missed; the conservative end imputes those bands with a high within-day variance.
+_cons = res.get("R2_max_conservative", res["R2_max"])
+print("R2_max (UPPER bound, label noise only): %.3f (optimistic) .. %.3f (conservative)"
+      % (res["R2_max"], _cons))
+print("  cluster-bootstrap band on the optimistic end: [%.3f, %.3f]  (from only %d stations -> treat as indicative, NOT a tight 95%% CI)"
+      % (res["R2_max_lo"], res["R2_max_hi"], res["n_stations"]))
+if res.get("ceiling_is_optimistic"):
+    print("  ⚠ high-AQI bands are under-covered (%.0f%% of label mass covered) -> the optimistic 0.9xx is a LOOSE upper bound;"
+          % (100 * res["p_mass_covered"]))
+    print("    the conservative %.3f is the more honest ceiling. Re-run with wider high-AQI coverage to tighten it." % _cons)
+print("honest R2 we measured (station-grouped): 0.220   |   cross-validated 0.385   |   published baseline: 0.550")
 print("honest interval-width floor: ~%.1f AQI (a 90%% range narrower than this over-claims)" % res["interval_width_floor"])
-print("based on %d station-days from %d stations" % (res["n_station_days"], res["n_stations"]))
-print("noise curve covers %.0f%% of the dataset's label mass (rest is high-AQI extrapolation -> R2_max is a looser upper bound)"
-      % (100 * res["p_mass_covered"]))"""),
+print("based on %d station-days from %d stations, %d countries" % (res["n_station_days"], res["n_stations"], hourly["country"].nunique()))"""),
 
     ("md", "### The within-day noise curve v(m) + a 2012-vs-2024 breakpoint sensitivity check"),
     ("code", """import pandas as pd
@@ -779,17 +797,27 @@ res["R2_max_2024"] = res_2024["R2_max"]
 json.dump(res, open(os.path.join(OUT, "error_ceiling.json"), "w"), indent=2, default=float)
 print("saved", os.path.join(OUT, "error_ceiling.json"), "(09_leakage reads its ceiling line from here)")"""),
 
-    ("md", """## Reading the result
+    ("md", """## Reading the result — honestly
 
-- **R²_max is an UPPER bound** (label noise only). The honest gap between our 0.22 and R²_max is the
-  room that *better vision* could recover; the gap between R²_max and 1.0 is forever lost to
+- **R²_max is an OPTIMISTIC UPPER bound** (label noise only). Report it as the **range** printed
+  above (optimistic → conservative), not one number. The honest gap between our 0.22–0.39 and R²_max
+  is the room that *better vision* could recover; the gap between R²_max and 1.0 is forever lost to
   daily-average labels.
-- **If R²(random) from `09_leakage` (0.759) exceeds R²_max, that split is *provably* leaky** — no
-  honest model can beat the label-noise ceiling, so a score above it can only come from leakage. The
-  `error_ceiling.json` saved here is what draws the ceiling line on the leakage-gradient figure.
+- **Do NOT quote the bootstrap band as a tight "95% CI".** It comes from a handful of stations
+  (~13 in the first run), where cluster bootstrap under-covers badly and cannot recover the high-AQI
+  bands the sample missed. Treat it as indicative; lean on the optimistic–conservative range and the
+  2012-vs-2024 sensitivity instead. Widening high-AQI coverage (more high-pollution stations) is what
+  actually tightens it.
+- **The ceiling is SPLIT-SPECIFIC** — it scales with a split's label variance Var(y). Compare each
+  split's R² only to *its own* ceiling (use `ceiling.per_split_r2max(var_eps, {split: Var(y)})`); do
+  not judge the random split's 0.759 against the station-grouped ceiling (their Var(y) differ).
+- Leakage is proven by the **causal contaminated-vs-clean test (0.762 vs −0.86)** and by the leaky
+  0.759 sitting above the entire honest cross-validated range — NOT by an R²>R²_max overlay, which is
+  only valid within one split. The `error_ceiling.json` saved here still draws a reference line.
 - The **width floor** is a lower bound on honest 90% interval width: no interval should be narrower
   than the pollution's own within-day spread.
-- The **95% CI** and the **2012-vs-2024** sensitivity show the estimate is robust, not a single fragile number.
+- **The load-bearing conclusion survives all the caveats:** label noise is small vs label spread, so
+  the honest R² is limited by the *visual task*, not by noisy labels.
 
 Paste these numbers back and I'll write them into `docs/RESULTS.md`.
 
@@ -904,8 +932,9 @@ and report **both** R² definitions (strict coefficient-of-determination `R2`, a
 `r2_pearson` that looser papers quote). All in AQI points."""),
     ("code", """# evaluate the BEST checkpoint (early stopping saved it), not the last epoch
 T.load_checkpoint(os.path.join(out_dir, "best_model.pth"), net, map_location=device)
-cal = T.collect_outputs(net, loaders["cal"], device)
-test = T.collect_outputs(net, loaders["test"], device)
+_tta = bool(cfg["train"].get("tta", False))    # flip-TTA on cal+test if enabled (keeps conformal valid)
+cal = T.collect_outputs(net, loaders["cal"], device, tta=_tta)
+test = T.collect_outputs(net, loaders["test"], device, tta=_tta)
 ymean, ystd = float(net.y_mean), float(net.y_std)
 cal_point = T.point_to_aqi(cal["point_out"], ymean, ystd)
 point = T.point_to_aqi(test["point_out"], ymean, ystd)
@@ -1091,6 +1120,24 @@ if not os.path.exists(cache_path):
         size=cfg["data"]["image_size"], patch=cfg["physics"]["dcp_patch"],
         omega=cfg["physics"]["dcp_omega"], top_frac=cfg["physics"]["atmos_top_frac"], t_min=cfg["physics"]["t_min"])
 cache = physics.load_map_cache(cache_path)"""),
+
+    ("md", """## (optional) Accuracy push — trade compute for a higher, HONEST R²
+
+Leave `ACCURACY_PUSH = False` for the plain single-model baseline (what `docs/RESULTS.md` reports as
+the honest headline). Set it **True** to enable the Stage-B/C levers *inside every fold* — a seed
+**ensemble** (average several models), weight **EMA**, and flip **TTA**. All are selected on the
+calibration set; the test fold is still evaluated once, and the split stays station-disjoint, so this
+is an honest accuracy gain (report it as a **new row beside** the baseline, not a replacement).
+
+> ⚠️ Compute: the ensemble trains `len(ensemble_seeds)` models **per fold**. With 5 folds × 3 seeds
+> that is 15 models (~15 h on a T4). Reduce `N_SPLITS` or the seed list if that's too long."""),
+    ("code", """ACCURACY_PUSH = False        # <- set True for the higher-accuracy ensemble run
+if ACCURACY_PUSH:
+    cfg["train"]["ema"] = True
+    cfg["train"]["tta"] = True
+    cfg["train"]["ensemble_seeds"] = [42, 1, 2]   # 3-member ensemble per fold
+print("accuracy push:", ACCURACY_PUSH, "| ema", cfg["train"]["ema"],
+      "| tta", cfg["train"]["tta"], "| ensemble_seeds", cfg["train"]["ensemble_seeds"])"""),
 
     ("md", """## Run leakage-safe grouped cross-validation
 

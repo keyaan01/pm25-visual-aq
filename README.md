@@ -19,15 +19,21 @@ The full results ledger is [`docs/RESULTS.md`](docs/RESULTS.md); the essential c
 walked through in [`docs/CODE_WALKTHROUGH.md`](docs/CODE_WALKTHROUGH.md); the plain-English story is
 [`docs/10_leakage.md`](docs/10_leakage.md).
 
-- **Honest accuracy** (station-grouped, leakage-safe): **R² = 0.220**, MAE 54.2 AQI, Spearman 0.65,
-  90% intervals ≈ calibrated (0.87).
+- **Honest accuracy** (station-grouped, leakage-safe): cross-validated **R² = 0.385 ± 0.19** (5
+  station-disjoint folds; 95% CI [0.196, 0.574]), MAE ≈ 46 AQI, Spearman 0.68, 90% intervals validated
+  (mean coverage **0.895**). The single-split **0.220** was one hard, high-variance draw (≈ the worst fold).
 - **Measured leakage inflation:** a leaky *random* split scores **R² = 0.759** — above the benchmark's
-  reported 0.55, while **no station-disjoint split reaches 0.55**. **Δ_leak(R²) = 0.539.**
+  reported 0.55 **and above the entire honest cross-validated range**. Leading, variance-free effect
+  size: **Δ_leak(MAE) = 27.8 AQI** (roughly halves the error); Δ_leak(R²) = 0.37–0.54 depending on the
+  honest endpoint.
 - **Proof it's leakage** (not an easier test set): inside the random split, *contaminated* photos score
-  R² = 0.76 while *clean* (genuinely unseen) photos score **−0.86**.
+  R² = 0.76 while *clean* (genuinely unseen) photos are worse than guessing the mean (MAE 30.4; R²
+  variance-amplified).
 
-The deliverable is the honest number **plus** the measured, causally-demonstrated leakage gap — not
-matching a score that only leakage can produce.
+The deliverable is **honest, robust reporting** (cross-validation + calibrated intervals + an error
+ceiling) **plus** a measured, causally-demonstrated leakage gap. We do **not** claim 0.55 is unreachable
+honestly — one honest fold reached 0.574 — the point is that single numbers on this task are unreliable
+and the data leaks dramatically.
 
 ## How it fits together
 
@@ -35,7 +41,7 @@ matching a score that only leakage can produce.
 |--------|--------------|
 | `src/` | Small reusable Python modules (the real logic), imported by the notebooks. |
 | `notebooks/` | One Colab notebook per phase — this is where you run things and read the explanations. |
-| `docs/` | Standalone Markdown you can read without running anything — including [`RESULTS.md`](docs/RESULTS.md) (results ledger) and [`CODE_WALKTHROUGH.md`](docs/CODE_WALKTHROUGH.md) (the essential code, explained). |
+| `docs/` | Standalone Markdown you can read without running anything — including [`STUDENT_GUIDE.md`](docs/STUDENT_GUIDE.md) (teaches the whole project from zero, for explaining it to a professor), [`RESULTS.md`](docs/RESULTS.md) (results ledger) and [`CODE_WALKTHROUGH.md`](docs/CODE_WALKTHROUGH.md) (the essential code, explained). |
 | `configs/default.yaml` | Every hyperparameter in one place. |
 | `tests/` | A tiny fixture + smoke-tests so the code can be checked on a laptop (no GPU). |
 | `data/`, `outputs/` | Created at run time (git-ignored). |

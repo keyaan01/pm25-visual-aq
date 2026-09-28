@@ -42,7 +42,8 @@ The outputs live in **log(AQI)** space (we train on the log target, Phase 5). Ex
 back to AQI is monotone, so the ordering is preserved.
 
 **Plus a point head (Phase 5b).** Alongside the three quantiles, the model has a 4th output — a
-plain linear **point head** trained with Huber loss — used for the accuracy numbers (MAE/RMSE/R²).
+plain linear **point head** trained with **MSE on a standardized (z-score) target** so it estimates
+the conditional *mean* (what R² rewards) — used for the accuracy numbers (MAE/RMSE/R²).
 `forward` returns a dict `{"quantiles", "point"}`. The quantiles give the calibrated interval; the
 point head gives the best single estimate. See `docs/05_training.md`.
 

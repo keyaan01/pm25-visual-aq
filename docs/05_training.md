@@ -60,11 +60,14 @@ The first honest run ranked pollution well (Spearman 0.72) but had low R² (0.15
 badly underpredicted rare, extreme-AQI photos. Three config-driven upgrades target this — all on
 by default in `configs/default.yaml`:
 
-1. **A dedicated point head, trained with Huber loss.** The median quantile minimises absolute
-   error, which predicts *low* on a right-skewed target and hurts R². A separate Huber-trained
-   point output chases the conditional mean instead. Its log→AQI bias is removed at eval with
-   **Duan's smearing** (a single scalar from the calibration residuals). Accuracy (MAE/RMSE/R²) is
-   reported from this point head; the intervals still come from the quantile heads.
+1. **A dedicated point head, trained with MSE on a standardized target.** The median quantile
+   minimises absolute error, which predicts *low* on a right-skewed target and hurts R². A separate
+   point output trained with **mean squared error** on the **standardized** target `(AQI−mean)/std`
+   chases the conditional *mean* instead (which is what R² rewards); at inference it is
+   de-standardized back to AQI and then **isotonic-recalibrated** on the calibration set to remove
+   residual bias. Accuracy (MAE/RMSE/R²) is reported from this point head; the intervals still come
+   from the quantile heads. *(A robust/Huber loss is available as an option but is NOT the default —
+   with a small delta it learns the median and depresses R², which was the original low-R² bug.)*
 2. **Class-balanced sampling** (`balanced_sampling`, `balance_power`): a `WeightedRandomSampler`
    oversamples rare high-AQI bands **in the train loader only**, so calibration/test keep the
    natural distribution and the conformal guarantee stays honest.

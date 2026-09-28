@@ -60,7 +60,8 @@ def report(point_pred: np.ndarray, interval_preds: np.ndarray, y_true: np.ndarra
            target: float = 0.90) -> dict:
     """Headline numbers using the dedicated point head for accuracy + quantiles for intervals.
 
-    point_pred    : (N,) smeared point estimate in AQI (drives MAE/RMSE/R²/category accuracy).
+    point_pred    : (N,) point estimate in AQI — the mean-seeking MSE point head, de-standardised
+                    and isotonic-recalibrated on calibration (drives MAE/RMSE/R²/category accuracy).
     interval_preds: (N, 3) conformally-calibrated [q05, q50, q95] in AQI (drives coverage/width).
     """
     out = point_metrics(y_true, point_pred)

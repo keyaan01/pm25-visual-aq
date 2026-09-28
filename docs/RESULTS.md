@@ -43,17 +43,20 @@ so it measures genuine generalisation to **unseen locations**.
 
 ---
 
-## 2. Headline honest result — station-grouped (leakage-safe)
+## 2. Honest result — station-grouped (leakage-safe), single split
 
-*Primary result. Generalisation to monitoring stations never seen in training. (Paper §3.11.)*
+*Generalisation to monitoring stations never seen in training. This is **one** split; the robust,
+cross-validated estimate is in §4b. (Paper §3.11.)*
 
 | R² | r²(Pearson) | MAE | RMSE | Spearman | coverage | SD(y_test) | n_train | n_test |
 |----|-------------|-----|------|----------|----------|------------|---------|--------|
-| **0.220** | 0.230 | **54.2** | 95.5 | 0.649 | 0.872 | 108.1 | 7,217 | 2,216 |
+| 0.220 | 0.230 | 54.2 | 95.5 | 0.649 | 0.872 | 108.1 | 7,217 | 2,216 |
 
 **Reading it:** the model **ranks** pollution well (Spearman 0.65) and its 90% intervals are close to
-calibrated (0.87). But the point-accuracy R² is modest — and well below the benchmark paper's reported
-**0.55**. That gap is the question the rest of this ledger answers.
+calibrated (0.87). Crucially, **this split was a hard, high-variance draw** — its test-set SD (108.1)
+is the highest of any split we ran, and R² depends on the test set's spread. Five-fold cross-validation
+(§4b) puts the honest R² at **0.385 ± 0.19**, so read 0.220 as the *pessimistic end* of the honest
+range, not the single true value.
 
 > **R² vs r²:** we report the strict **coefficient of determination** (`R2`, penalises bias/scale) as
 > the headline, *and* the squared-Pearson correlation (`r2_pearson`, association only) because looser
@@ -67,8 +70,10 @@ The PM25Vision paper reports **EfficientNet-B0 R² = 0.550** (MAE 36.6, RMSE 54.
 whose station-handling is unspecified. Two checks told us our 0.22 was not a mistake:
 
 1. **Literature.** Honest single-photo, cross-location, daily-average AQI regression sits at
-   **R² ≈ 0.1–0.35**. The closest analogue (Mondal 2024) reaches R² ≈ 0.39 on an *easier* setup
-   (single city, not station-disjoint). So **0.22 is field-normal and 0.55 is the outlier.**
+   **R² ≈ 0.1–0.35**; the closest analogue (Mondal 2024) reaches R² ≈ 0.39 on an *easier* setup
+   (single city, not station-disjoint). Our cross-validated honest **R² ≈ 0.385 (§4b) matches that
+   analogue** — squarely field-normal. So the benchmark's 0.55 sits at the *optimistic edge* of what
+   honest evaluation gives, not in a different league.
 
 2. **We reproduced the dataset's own station-disjoint 80/20 ("shipped") split** with our correct
    model → **R² = 0.378** (see table below). Still far from 0.55 — so the gap is **not** our split
@@ -93,18 +98,66 @@ measured it directly.
 | geographic (hardest) | −0.079 | 0.053 | 59.9 | 104.5 | 100.6 | 0.862 | 0.862 | 7,086 | 2,104 | 0 |
 
 **Headline:**
-- **Δ_leak(R²) = R²(random) − R²(station_grouped) = 0.759 − 0.220 = 0.539.**
-- **Δ_leak(MAE) = 54.2 − 26.4 = 27.8 AQI** (MAE, unlike R², does not depend on the test-set variance).
+- **Δ_leak(MAE) = 54.2 − 26.4 = 27.8 AQI** — the **primary, variance-free** effect size (MAE, unlike
+  R², does not depend on the test set's spread). The leaky split roughly *halves* the error.
+- **Δ_leak(R²):** against the single hard draw it is 0.759 − 0.220 = **0.539**; against the robust
+  cross-validated honest mean (§4b) it is 0.759 − 0.385 = **0.374**. Both are large; we report the pair
+  rather than only the most dramatic one, because the single-split 0.220 is the pessimistic end.
 
 **Reading it:**
-- The leaky **random** split scores **0.759 — above the paper's 0.55.** So a station-leaky split
-  easily produces (and exceeds) the benchmark's number.
-- Every **station-disjoint** split is far lower (shipped 0.378, station_grouped 0.220, geographic
-  −0.079). The score falls as fewer stations are shared across train/test (the last column).
-- We **could not reproduce 0.55 on any station-disjoint split.**
+- The leaky **random** split scores **0.759 — above the paper's 0.55**, and above the *entire* honest
+  cross-validated range (§4b; upper 95% CI ≈ 0.574). So a station-leaky split inflates beyond what
+  honesty can reach.
+- The station-disjoint single splits (shipped 0.378, station_grouped 0.220, geographic −0.079) look far
+  lower — but these are **single draws**, and §4b shows honest R² swings 0.15–0.57 depending on which
+  stations are held out, so no single one of them is "the" honest number.
+- **Honest correction:** we do **not** claim 0.55 is unreachable honestly — cross-validation (§4b) found
+  an honest fold at **0.574 > 0.55**. The leakage evidence is the *random* split exceeding the honest CI
+  and the causal test below (§5), **not** the impossibility of 0.55.
 
 > **Confounder control:** R² depends on the test set's own variance, so `SD(y_test)`, `MAE` and `RMSE`
 > are shown alongside every R². The MAE gap (27.8 AQI) tells the same story variance-free.
+
+---
+
+## 4b. Cross-validation — how robust is the honest number?
+
+*Leakage-safe **5-fold GroupKFold on `station_id`** — every station tested exactly once, never in its
+own fold's training; each fold station-disjoint (straddling = 0). Same model/config as the single split.
+(Code: `src/crossval.py`, `notebooks/10_crossval.ipynb`; narrative: [`11_crossval.md`](11_crossval.md).)*
+
+| fold | R² | r²(Pearson) | MAE | RMSE | Spearman | coverage | SD(y_test) |
+|---|---|---|---|---|---|---|---|
+| 0 | 0.405 | 0.444 | 43.3 | 57.3 | 0.679 | 0.838 | 74.3 |
+| 1 | 0.574 | 0.587 | 45.0 | 64.5 | 0.751 | 0.926 | 98.8 |
+| 2 | 0.365 | 0.372 | 43.1 | 62.7 | 0.628 | 0.856 | 78.7 |
+| 3 | 0.429 | 0.491 | 44.5 | 59.3 | 0.718 | 0.949 | 78.5 |
+| 4 | 0.152 | 0.160 | 55.7 | 91.1 | 0.619 | 0.908 | 98.9 |
+
+**Across the 5 folds:** **R² = 0.385** (SD 0.15; 95% CI [0.196, 0.574]) · MAE = 46.3 (SD 5.3) ·
+Spearman = 0.679 (SD 0.06) · **coverage = 0.895 (SD 0.05)**.
+
+> **Reading the ±:** the R² "95% CI [0.196, 0.574]" is a Student-t interval with **half-width ≈ 0.19**
+> (the across-fold **SD is 0.15** — a different quantity, don't confuse them). For MAE/Spearman/coverage
+> we quote the **SD** across folds. **Caveat:** these 5 folds come from a *single* deterministic
+> GroupKFold partition, so they are **correlated** (they share training data); the plain Student-t CI is
+> therefore mildly **optimistic** (anti-conservative). A fully rigorous interval would use repeated
+> grouped CV over several seeds with the Nadeau–Bengio corrected-resampled-t
+> (`crossval.nadeau_bengio_ci`); the qualitative conclusion is unchanged.
+
+**Three findings:**
+1. **The robust honest number is R² = 0.385 ± 0.19**, MAE 46.3 — *higher* than the single-split 0.220,
+   which was one hard, high-variance draw (≈ fold 4's 0.152).
+2. **The conformal intervals are validated:** mean coverage **0.895 ≈ the 0.90 target** across
+   independent folds — strong evidence the calibration works, not just on one split.
+3. **Honest R² is highly split-dependent (0.15–0.57).** This is itself a result: a *single* R² on this
+   task is unreliable — which is exactly why single-number benchmarks (the paper's 0.55 included) must
+   be distrusted, and why we report a CI, calibrated intervals, and an error ceiling.
+
+> **The honest correction this forces:** one honest fold reached **0.574 > 0.55**, so we retract any
+> claim that "0.55 is unreachable honestly." 0.55 is within the honest range. The leakage is proven by
+> §5 (the causal test) and by the leaky 0.759 exceeding the whole honest CI — not by 0.55 being
+> impossible.
 
 ---
 
@@ -121,28 +174,51 @@ perceptual-hash near-duplicate also appears in that model's training set) vs **c
 
 **Reading it:** the random split's high score lives **entirely in the leaked photos**. On genuinely
 unseen locations the same model is **worse than predicting the average** (negative R²). This proves the
-inflation is *leakage*, not the random test set merely being easier.
+inflation is *leakage*, not the random test set merely being easier. **Lead with the MAE gap (25.4 vs
+30.4):** it is the honest, variance-free effect size and shows the accuracy difference is real but
+*modest in absolute terms* — the drama is in R², for the reason below.
 
-> **Honest caveat (kept in the write-up):** the clean subset's R² comes from the *random-trained*
-> model on its unseen-station slice, so "clean ≈ station_grouped" is a **qualitative** statement (both
-> generalise poorly) — clean is in fact a little worse, because a leakage-trained model generalises
-> badly to truly-unseen places. The direction (contaminated ≫ clean) is what carries the argument.
+> **Honest caveat (kept in the write-up):** the −0.86 is **variance-amplified, not a catastrophic
+> prediction failure.** The clean subset is small (n = 463) and dominated by single-image, low-variance
+> stations, so its label spread SD(y) is small; since R² = 1 − (RMSE/SD)², a *modest* RMSE on a
+> low-variance set drives R² sharply negative. The MAE (30.4) confirms the predictions are not wild —
+> only a little worse than on contaminated photos. So treat clean R² = −0.86 as **qualitative** (the
+> model generalises poorly to truly-unseen places), and let the **MAE gap + the direction
+> (contaminated ≫ clean)** carry the argument, not the −0.86 magnitude. *(The re-run reports each
+> subset's SD_y and RMSE, added in `leakage.contaminated_vs_clean`, to make this explicit.)*
 
-**Conclusion:** the benchmark's 0.55 is fully consistent with station-level leakage; **our honest
-0.22 is the real generalisation number.** The project's deliverable is that honest number *plus the
-measured leakage gap* — not matching an inflated benchmark.
+**Conclusion (two honest findings):**
+1. **The data is dramatically leakage-prone.** A leaky split inflates to **0.759** — above the entire
+   honest range — and the causal test proves the inflation is the *leaked photos*, not an easier test set.
+2. **Honest, cross-validated performance is R² = 0.385 ± 0.19** (§4b), and single splits swing 0.15–0.57,
+   so *any* single number on this task — including the benchmark's 0.55 — is unreliable on its own.
+
+The deliverable is therefore honest, robust reporting (cross-validation + calibrated intervals + an
+error ceiling) **plus** a measured, causally-proven leakage effect — **not** a claim that a specific
+published number was faked (0.55 is within the honest range; we don't accuse, we measure).
 
 ---
 
-## 6. Correctness verification (2026-09-25)
+## 6. Correctness verification (two independent audits)
 
-Before building on these numbers, three independent read-only audit agents read every module in full
-and ran numerical spot-checks. **No result-affecting bug in any layer.** Verified: leakage
-prediction-to-row ordering is correct (so the contaminated/clean split is meaningful); the physics
-cache aligns with the right image; splits are station-disjoint *by construction*; conformal coverage
-math is correct (sim 0.9006); the point head is genuinely mean-seeking; and **every row above
-reconciles** R² ≈ 1 − (RMSE/SD)² to within 0.0008. Findings were limited to harmless cleanups (since
-applied).
+**Audit 1 (2026-09-25).** Three independent read-only agents read every module in full and ran
+numerical spot-checks. **No result-affecting bug in any layer.** Verified: leakage prediction-to-row
+ordering is correct (so the contaminated/clean split is meaningful); the physics cache aligns with the
+right image; splits are station-disjoint *by construction*; conformal coverage math is correct (sim
+0.9006); the point head is genuinely mean-seeking; and **every row above reconciles** R² ≈ 1 − (RMSE/SD)²
+to within 0.0008. Findings were limited to harmless cleanups (since applied).
+
+**Audit 2 (2026-09-28) — re-verification after cross-validation + C2.** Three more independent
+read-only agents re-checked everything that feeds a reported number. Verdict: **the R² (0.220 single,
+0.385 ± 0.19 CV), the leakage gradient, and the causal contaminated/clean result are all computed
+correctly and honestly — no result-affecting bug.** The one over-statement they found was in **C2**: the
+first-run R²_max ≈ 0.977 is a *loose, optimistically-biased* upper bound (see "Provisional" below), not
+a precise figure — the *math* is right but the sample was too small and skewed low-AQI. Everything else
+was reporting/robustness polish, now applied: the ±-convention is disambiguated (§4b), the leakage gap
+is reported at both endpoints and led by the variance-free MAE (§4), the −0.86 is flagged as
+variance-amplified (§5), the CV CI is noted as mildly optimistic on correlated folds (§4b), one notebook
+that skipped the isotonic step was fixed to match the ledger, and defensive asserts + tests were added
+(end-to-end label↔prediction alignment, shipped station-disjointness, physics-cache alignment).
 
 ---
 
@@ -150,14 +226,25 @@ applied).
 
 - `outputs/leakage_gradient.csv` — the table in §4.
 - `outputs/contaminated_vs_clean.json` — the numbers in §5.
+- `outputs/cv_folds.csv` + `outputs/cv_summary.json` — the cross-validation in §4b.
 - The leakage-gradient figure (bars per split, with the 0.55 line) — from `notebooks/09_leakage.ipynb`.
-- Reproduce: `notebooks/09_leakage.ipynb` on a Kaggle GPU (one commit run). Tag the producing commit
-  `honest-baseline-v1` so this exact state is citable.
+- Reproduce: `09_leakage.ipynb` (gradient) and `10_crossval.ipynb` (CV) on a Kaggle GPU (commit runs).
 
-## Still to come (will be appended here, not overwritten)
+## Provisional / still to come
 
-- **C2 — error ceiling:** how much of the honest residual is irreducible daily-average label noise
-  (an upper bound on any model's R²). *(Paper §3.10.)*
+- **C2 — error ceiling (first run, provisional — report as a RANGE, not 0.977):** the first pass gave
+  R²_max ≈ 0.977, but Audit 2 showed this is a **loose, optimistically-biased upper bound**, so we do
+  **not** report it as "0.977 (95% CI [0.963, 0.994])" — that is false precision. Three biases all push
+  it *up*: (i) the reference sample (only ~13 stations) **under-covered the high-AQI bands**, where
+  within-day swings are largest, and those bands were renormalized away → Var(ε) understated; (ii)
+  hourly readings smooth sub-hourly variation; (iii) the ceiling is **split-specific** (it scales with
+  each split's label variance), so one global number misleads. The **honest range is ≈ 0.90–0.95**
+  (realistic) up to ~0.95–0.98 (this small sample's optimistic end); the code now also reports a
+  **conservative** ceiling (imputing the uncovered high bands with a high v) and a `p_mass_covered`
+  optimism flag, and the OpenAQ fetch now deliberately targets high-pollution regions. A clean re-run of
+  `07_error_ceiling.ipynb` (with the high-AQI targeting + a free OpenAQ key) is pending. **The
+  load-bearing conclusion is unchanged:** label noise is small vs label spread, so the honest 0.22–0.39
+  R² is limited by the *visual task*, not by noisy labels. *(Paper §3.10.)*
 - **C3 — abstention:** refuse-to-answer on unusable photos; risk–coverage curves. *(Paper §3.9.)*
-- **Bigger model:** a larger backbone is planned; its honest result will be added as a **new row**
-  beside the EfficientNet-B0 baseline, so both remain on record.
+- **Bigger model:** a larger backbone can be added as a **new row** beside EfficientNet-B0 (both on
+  record). Backbone search was declined; B0 is the paper's strongest on this dataset.

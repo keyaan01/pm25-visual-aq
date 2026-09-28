@@ -20,8 +20,10 @@ output* and *which photos it sees*, not a failure to learn. So the fixes are che
 
 ## The fix (Stage A) — reliable, high-impact
 
-- **A standardized point head for the mean.** A separate output, trained with **Huber loss** on the
-  **standardized** target `(AQI − mean) / std`. Standardizing is the key reliability choice: a fresh
+- **A standardized point head for the mean.** A separate output, trained with **MSE** on the
+  **standardized** target `(AQI − mean) / std` — MSE targets the conditional *mean*, which is exactly
+  what R² rewards (a robust/Huber loss with a small delta would learn the median and depress R²).
+  Standardizing is the key reliability choice: a fresh
   head starts by predicting the dataset **mean** (a good starting point) and there is no unstable
   log→AQI retransformation. The train-set mean/std are stored *in the model* (as buffers) so they
   travel with the checkpoint. Accuracy (MAE/RMSE/R²) is reported from this head; the interval still

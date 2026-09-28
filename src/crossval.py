@@ -53,7 +53,15 @@ def make_cv_folds(df, n_splits=5, cal_frac=0.1875, seed=42, station_col="station
 
 
 def summarize_cv(reports, keys=("R2", "r2_pearson", "MAE", "RMSE", "Spearman", "coverage")):
-    """Mean, std and a 95% CI (Student-t) across folds for each metric."""
+    """Mean, std and a 95% CI (Student-t) across folds for each metric.
+
+    Each metric dict has: `mean`, `std` (sample SD across folds, ddof=1), `ci_half` (the CI
+    half-width = t_{.975,n-1}·std/√n), `ci_lo`/`ci_hi` (mean ± ci_half), and `n`.
+    Report `std` and `ci_half` under DIFFERENT symbols — do NOT print the SD as if it were the CI.
+    NOTE: a single deterministic GroupKFold gives 5 CORRELATED folds (they share training data), so
+    this plain Student-t CI is mildly optimistic (anti-conservative). For a rigorous interval, run
+    repeated grouped CV over several seeds and use `nadeau_bengio_ci`.
+    """
     n = len(reports)
     tcrit = float(stats.t.ppf(0.975, max(1, n - 1)))
     out = {}
@@ -62,8 +70,30 @@ def summarize_cv(reports, keys=("R2", "r2_pearson", "MAE", "RMSE", "Spearman", "
         m = float(np.mean(vals))
         sd = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
         half = tcrit * sd / np.sqrt(len(vals)) if len(vals) > 1 else 0.0
-        out[kx] = {"mean": m, "std": sd, "ci_lo": m - half, "ci_hi": m + half, "n": int(len(vals))}
+        out[kx] = {"mean": m, "std": sd, "ci_half": half,
+                   "ci_lo": m - half, "ci_hi": m + half, "n": int(len(vals))}
     return out
+
+
+def nadeau_bengio_ci(vals, test_frac=0.20, ci=0.95):
+    """Corrected-resampled-t CI for (repeated) cross-validation, per Nadeau & Bengio (2003).
+
+    Ordinary CV folds are correlated (they share training data), so the naive across-fold t-interval
+    understates uncertainty. The corrected variance inflates the sample variance by
+    `(1/k + test_frac/(1-test_frac))`, where k = number of fold scores and test_frac is the test
+    share per fold. Use this over `summarize_cv`'s plain CI when you have repeated/multi-seed grouped
+    CV scores and want an honest interval. Returns {mean, ci_lo, ci_hi, half, k}.
+    """
+    v = np.asarray(vals, dtype=float)
+    k = len(v)
+    m = float(v.mean())
+    if k < 2:
+        return {"mean": m, "ci_lo": m, "ci_hi": m, "half": 0.0, "k": k}
+    var = float(v.var(ddof=1))
+    corrected = var * (1.0 / k + test_frac / max(1e-9, 1.0 - test_frac))
+    tcrit = float(stats.t.ppf(0.5 + ci / 2.0, k - 1))
+    half = tcrit * np.sqrt(max(0.0, corrected))
+    return {"mean": m, "ci_lo": m - half, "ci_hi": m + half, "half": half, "k": k}
 
 
 def run_cv(ds, df, cache, cfg, device, out_root, n_splits=5, seed=None, num_workers=2,

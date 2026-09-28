@@ -55,6 +55,18 @@ def train_model(net, loaders, cfg, device, out_dir="outputs",
     if hasattr(net, "set_target_stats"):
         net.set_target_stats(y_mean, y_std)
 
+    # Optional weight EMA (Stage B): keep an exponential moving average of the weights. We evaluate
+    # the cal metric AND checkpoint the EMA weights, since the averaged model is usually a little more
+    # accurate and more stable. use_buffers=True so BN running stats are averaged too; the constant
+    # y_mean/y_std buffers are unchanged by averaging. Created AFTER set_target_stats so the buffers
+    # are already correct when the EMA copy is initialised.
+    use_ema = bool(cfg["train"].get("ema", False))
+    ema = None
+    if use_ema:
+        from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+        ema_decay = float(cfg["train"].get("ema_decay", 0.999))
+        ema = AveragedModel(net, multi_avg_fn=get_ema_multi_avg_fn(ema_decay), use_buffers=True)
+
     opt = torch.optim.AdamW(net.parameters(), lr=cfg["train"]["lr"],
                             weight_decay=cfg["train"]["weight_decay"])
     sched = torch.optim.lr_scheduler.LambdaLR(
@@ -81,12 +93,16 @@ def train_model(net, loaders, cfg, device, out_dir="outputs",
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
+            if ema is not None:
+                ema.update_parameters(net)
             running += loss.item() * len(y)
             seen += len(y)
         sched.step()
 
         train_loss = running / max(1, seen)
-        cal_mae = point_mae_from_outputs(collect_outputs(net, loaders["cal"], device), y_mean, y_std)
+        # Evaluate (and later checkpoint) the EMA weights when EMA is on, else the live weights.
+        eval_model = ema.module if ema is not None else net
+        cal_mae = point_mae_from_outputs(collect_outputs(eval_model, loaders["cal"], device), y_mean, y_std)
         history["train_loss"].append(train_loss)
         history["cal_point_mae"].append(cal_mae)
         history["lr"].append(epoch_lr)
@@ -96,7 +112,7 @@ def train_model(net, loaders, cfg, device, out_dir="outputs",
 
         if cal_mae < best_mae - 1e-4:
             best_mae, best_epoch, bad = cal_mae, epoch, 0
-            torch.save({"model": net.state_dict(), "quantiles": quantiles,
+            torch.save({"model": eval_model.state_dict(), "quantiles": quantiles,
                         "cfg": dict(cfg), "epoch": epoch, "cal_point_mae": cal_mae,
                         "y_mean": y_mean, "y_std": y_std}, ckpt_path)
         else:
@@ -115,20 +131,33 @@ def train_model(net, loaders, cfg, device, out_dir="outputs",
 
 
 @torch.no_grad()
-def collect_outputs(net, loader, device):
+def collect_outputs(net, loader, device, tta=False):
     """Run the model over a loader and return raw arrays.
 
     Returns a dict of numpy arrays:
       "q_log":     (N, Q) quantile predictions (always log space),
       "point_out": (N,)  point-head predictions (in the point head's training space),
       "y_raw":     (N,)  targets in AQI.
+
+    `tta` (test-time augmentation): when True, average each prediction over the image and its
+    horizontal flip. The flip is GEOMETRIC (safe for all 5 channels), and averaging two ascending
+    quantile vectors stays ascending, so monotonicity is preserved. TTA must be applied to BOTH the
+    calibration and test sets (never test only) so the conformal Q and isotonic map stay valid.
     """
     net.eval()
     qs, ps, ys = [], [], []
     for x, y in loader:
-        out = net(x.to(device))
-        qs.append(out["quantiles"].cpu().numpy())
-        ps.append((out["point"] if "point" in out else out["quantiles"][:, 1]).cpu().numpy())
+        x = x.to(device)
+        out = net(x)
+        q = out["quantiles"]
+        p = out["point"] if "point" in out else out["quantiles"][:, 1]
+        if tta:
+            out_f = net(torch.flip(x, dims=[-1]))          # horizontal flip (last dim = width)
+            q = 0.5 * (q + out_f["quantiles"])
+            p_f = out_f["point"] if "point" in out_f else out_f["quantiles"][:, 1]
+            p = 0.5 * (p + p_f)
+        qs.append(q.cpu().numpy())
+        ps.append(p.cpu().numpy())
         ys.append(y.numpy())
     return {"q_log": np.concatenate(qs), "point_out": np.concatenate(ps),
             "y_raw": np.concatenate(ys)}

@@ -111,6 +111,46 @@ def test_nan_readings_dropped():
     print("[ceiling] invalid/NaN readings dropped -> finite var + finite floor OK")
 
 
+def test_high_band_coverage_and_conservative():
+    # Reference covers only LOW/MID bands; the dataset has heavy HIGH-AQI mass -> the optimistic
+    # ceiling silently drops the high bands, so the CONSERVATIVE estimate (impute them) must give a
+    # larger Var(eps) and hence a LOWER, tighter ceiling; compute_ceiling must flag it optimistic.
+    per_day = pd.DataFrame([
+        {"station": "A", "date": "d1", "n_hours": 20, "day_mean_aqi": 25.0, "within_day_var": 90.0},
+        {"station": "A", "date": "d2", "n_hours": 20, "day_mean_aqi": 25.0, "within_day_var": 90.0},
+        {"station": "B", "date": "d1", "n_hours": 20, "day_mean_aqi": 75.0, "within_day_var": 150.0},
+        {"station": "B", "date": "d2", "n_hours": 20, "day_mean_aqi": 75.0, "within_day_var": 150.0},
+    ])
+    labels = [25.0] * 20 + [75.0] * 20 + [250.0] * 30 + [400.0] * 30   # half in uncovered high bands
+    v_opt, _ = Cg.level_reweighted_var_epsilon(per_day, labels)
+    v_con, _ = Cg.level_reweighted_var_epsilon(per_day, labels, impute_uncovered=True)
+    assert v_con > v_opt, f"conservative Var(eps) {v_con} must exceed optimistic {v_opt}"
+
+    hourly = _synthetic_hourly(n_hours=20)               # covers low/mid bands only
+    full = Cg.compute_ceiling(hourly, labels, var_labels=11708.0, n_boot=50, seed=3)
+    assert full["ceiling_is_optimistic"] is True, "should flag optimistic when high bands uncovered"
+    assert full["p_mass_covered"] < 0.98
+    assert "R2_max_conservative" in full and full["R2_max_conservative"] <= full["R2_max"] + 1e-9
+    print("[ceiling] high-band gating: p_covered=%.2f, R2_max=%.3f, conservative=%.3f (optimistic flag) OK"
+          % (full["p_mass_covered"], full["R2_max"], full["R2_max_conservative"]))
+
+
+def test_per_split_r2max_and_hygiene():
+    # split-specific ceilings scale with each split's label variance
+    r = Cg.per_split_r2max(274.7, {"station_grouped": 108.1 ** 2, "random": 87.4 ** 2})
+    assert r["station_grouped"] > r["random"], "higher-variance split must have a higher ceiling"
+    # NaN labels are dropped by _label_hist (no spurious top-band mass)
+    p = Cg._label_hist([10.0, 20.0, float("nan"), 30.0])
+    assert abs(p.sum() - 1.0) < 1e-9 and p[-1] == 0.0
+    # absurd concentration spike is filtered out (plausibility cap)
+    hourly = _synthetic_hourly(n_hours=20)
+    spike = pd.DataFrame([{"location_id": "A", "datetime": "2024-01-01T07:00:00Z", "pm25_ugm3": 5000.0}])
+    clean = Cg._clean_hourly_aqi(pd.concat([hourly, spike], ignore_index=True),
+                                 "pm25_ugm3", "datetime", Cg.PM25_BREAKPOINTS)
+    assert (clean["aqi"] < 2000).all(), "spike above max_ugm3 must be dropped"
+    print("[ceiling] per-split R2_max scales with Var(y); NaN labels + spikes filtered OK")
+
+
 def test_empty_data_clean_error():
     empty = pd.DataFrame(columns=["location_id", "datetime", "pm25_ugm3"])
     _, per_day = Cg.within_day_aqi_variance(empty, min_hours=18)
@@ -131,5 +171,7 @@ if __name__ == "__main__":
     test_error_ceiling_and_floor()
     test_bootstrap_and_compute()
     test_nan_readings_dropped()
+    test_high_band_coverage_and_conservative()
+    test_per_split_r2max_and_hygiene()
     test_empty_data_clean_error()
     print("\nALL C2 CEILING SMOKE CHECKS PASSED")

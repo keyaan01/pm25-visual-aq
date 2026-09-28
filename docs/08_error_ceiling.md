@@ -21,10 +21,19 @@ labels, not the model.
 R²_max = 1 − Var(ε) / Var(y)
 ```
 
-**We report R²_max explicitly as an UPPER bound.** It accounts for **label noise only** (daily
-averaging). A real model *also* loses accuracy to limited visual signal, class imbalance, and
-domain shift — so our honest R² (0.22) can sit well below R²_max with nothing wrong. Read the ceiling
-as "the most any model could hope for on these labels," not "what we should be getting."
+**We report R²_max explicitly as an OPTIMISTIC UPPER bound, and as a RANGE — not one precise number.**
+It accounts for **label noise only** (daily averaging). A real model *also* loses accuracy to limited
+visual signal, class imbalance, and domain shift — so our honest R² (0.22 single, 0.385 cross-validated)
+can sit well below R²_max with nothing wrong. Read the ceiling as "the most any model could hope for on
+these labels," not "what we should be getting."
+
+> **Honesty note (from the correctness audit).** The first-run point value **R²_max ≈ 0.977 is a
+> *loose, optimistically-biased* upper bound** — do not quote it as a precise "0.977 (95% CI …)". Three
+> biases all push it *up*: the reference sample under-covered the high-AQI bands (largest within-day
+> swings), hourly readings smooth sub-hourly variation, and the ceiling is split-specific. The honest
+> range is roughly **0.90–0.95** (realistic) up to ~0.95–0.98 (this small sample's optimistic end). The
+> code now also reports a **conservative** ceiling and a `p_mass_covered` optimism flag; a re-run with
+> deliberate high-AQI coverage is what tightens it.
 
 ## How we estimate it — three best-practice refinements
 
@@ -48,9 +57,17 @@ So the ceiling reflects the dataset we actually evaluate on. (`level_reweighted_
 the **station-grouped test split's** label variance (SD ≈ 108 AQI) — the split we headline — not the
 whole-dataset variance.
 
-On top of these we report a **station cluster-bootstrap 95% CI** on R²_max (resampling whole
-stations, which respects the dependence between a station's days) and a **2012-vs-2024 breakpoint
-sensitivity** check, so the number is shown to be robust rather than a single fragile point estimate.
+**4. High-AQI coverage + a conservative estimate.** Within-day swing is *largest* at high AQI, so a
+reference sample that misses the high bands understates Var(ε) and inflates R²_max. We now (a) report
+`p_mass_covered` — the fraction of the dataset's label mass the noise curve actually covers — and flag
+the ceiling **optimistic** when it is below ~0.98; and (b) compute a **conservative** R²_max that imputes
+the uncovered high bands with a high v (monotone-extrapolated), giving the lower end of the honest range.
+The OpenAQ fetch also now deliberately over-samples high-pollution regions (`HIGH_AQI_COUNTRIES`).
+
+On top of these we report a station cluster-bootstrap band and a **2012-vs-2024 breakpoint sensitivity**
+check. **Caveat:** the bootstrap band comes from very few stations (~13 in the first run), where cluster
+bootstrap under-covers badly and cannot recover the missing high bands — so treat it as *indicative*,
+not a tight 95% CI. Lean on the optimistic→conservative range and the breakpoint sensitivity instead.
 
 `src/ceiling.py` keeps the math (`within_day_aqi_variance`, `conditional_noise_curve`,
 `level_reweighted_var_epsilon`, `error_ceiling`, `bootstrap_r2max_ci`, `compute_ceiling`) pure and
@@ -74,21 +91,29 @@ estimate.
 
 ## How to read the answer
 
-- **The gap 0.22 → R²_max** is the room that *better vision* could still recover; the gap
+- **The gap 0.22–0.39 → R²_max** is the room that *better vision* could still recover; the gap
   **R²_max → 1.0** is forever lost to daily-average labels.
-- **The leakage link:** if `09_leakage`'s random-split R² (0.759) is **above** R²_max, that split is
-  *provably* leaky — no honest model can beat the label-noise ceiling. The notebook saves
-  `outputs/error_ceiling.json`, and the leakage-gradient figure draws its ceiling line from it.
+- **The leakage link (careful — the ceiling is split-specific).** R²_max scales with a split's label
+  variance, so compare each split's R² only to *its own* ceiling (`ceiling.per_split_r2max`). The
+  leakage proof does **not** rest on "R²(random) > R²_max" (that would need the random split's own
+  Var(y)); it rests on the causal contaminated-vs-clean test (0.762 vs −0.86) and the leaky 0.759
+  exceeding the whole honest cross-validated range. The notebook still saves `outputs/error_ceiling.json`
+  and the leakage-gradient figure draws a ceiling reference line from it.
 - **Interval-width floor** → no honest 90% interval should be narrower than the pollution's own
   within-day spread.
 
 ## Caveats (stated honestly in the paper)
 
 - Converting *hourly* µg/m³ to an "instantaneous AQI" is an approximation (AQI is officially a
-  24-hour construct), but it's the right proxy for "how much would the label move if measured at this
-  instant," and we work in AQI points throughout.
-- Within-day variance varies by place and season; the level-reweighting + bootstrap CI + breakpoint
-  sensitivity are exactly how we make the single reported number defensible rather than fragile.
+  24-hour construct). Note the **direction of the bias**: hourly readings are themselves 1-hour
+  averages, so they *smooth* sub-hourly variation → Var(ε) is under-estimated → R²_max comes out a
+  little *too high*. One of the reasons we treat the ceiling as an optimistic bound.
+- The first-run sample **under-covered high-AQI conditions**, where within-day swings are largest —
+  another upward bias on R²_max. The `p_mass_covered` flag, the conservative estimate, and the
+  high-pollution-targeted fetch address it; until the re-run, read R²_max as the *range* above.
+- Within-day variance varies by place and season; the level-reweighting + conservative bound +
+  breakpoint sensitivity are how we make the ceiling defensible **as a range**, rather than pretending
+  a tiny sample gives one precise number.
 
 ## Next
 

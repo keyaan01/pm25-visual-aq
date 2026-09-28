@@ -52,18 +52,20 @@ PM25_PARAMETER_ID = 2   # OpenAQ's parameter id for PM2.5
 AQI_BAND_EDGES = (0, 50, 100, 150, 200, 300, 10_000)
 
 
-def _clean_hourly_aqi(hourly, ugm3_col, time_col, table):
+def _clean_hourly_aqi(hourly, ugm3_col, time_col, table, max_ugm3=1000.0):
     """Return the hourly frame with a finite `aqi` column and a `date` column.
 
     OpenAQ occasionally returns negative or missing values; those convert to a non-finite AQI and
     would poison the within-day variance / deviations (a single NaN makes the whole day's variance
     NaN and the pooled percentile floor NaN). We drop them here, once, so every downstream group has
-    only valid readings and `min_hours` counts VALID hours.
+    only valid readings and `min_hours` counts VALID hours. We also drop absurd spikes above
+    `max_ugm3` (OpenAQ sometimes emits erroneous sentinel/spike values); a single bad spike would
+    otherwise blow up a day's within-day variance and destabilise the estimate.
     """
     df = hourly.copy()
     conc = pd.to_numeric(df[ugm3_col], errors="coerce")
-    df["aqi"] = [pm25_to_aqi(c, table) if (c is not None and np.isfinite(c)) else float("nan")
-                 for c in conc]
+    df["aqi"] = [pm25_to_aqi(c, table) if (c is not None and np.isfinite(c) and 0 <= c <= max_ugm3)
+                 else float("nan") for c in conc]
     df["date"] = pd.to_datetime(df[time_col], errors="coerce").dt.date
     keep = np.isfinite(pd.to_numeric(df["aqi"], errors="coerce")) & df["date"].notna()
     return df[keep].copy()
@@ -137,22 +139,71 @@ def conditional_noise_curve(per_day, edges=AQI_BAND_EDGES) -> pd.DataFrame:
 
 
 def _label_hist(labels, edges=AQI_BAND_EDGES) -> np.ndarray:
-    """p(m): fraction of dataset labels in each AQI band (aligned to `edges`)."""
-    band = np.digitize(np.asarray(labels, dtype=float), np.asarray(edges[1:-1]))
+    """p(m): fraction of dataset labels in each AQI band (aligned to `edges`).
+
+    NaN labels are dropped first (otherwise np.digitize would silently bin them into the top band).
+    """
+    arr = np.asarray(labels, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    band = np.digitize(arr, np.asarray(edges[1:-1]))
     counts = np.bincount(band, minlength=len(edges) - 1).astype(float)
-    return counts / counts.sum()
+    total = counts.sum()
+    return counts / total if total > 0 else counts
 
 
-def level_reweighted_var_epsilon(per_day, dataset_labels, edges=AQI_BAND_EDGES):
+def _impute_uncovered_v(curve, p, edges):
+    """Conservative v(m) for dataset bands that carry label mass (p>0) but have NO reference data.
+
+    Uncovered bands are almost always the HIGH-AQI bands, where within-day swings (v) are LARGEST.
+    Dropping them (the default renormalisation) understates Var(eps) and so INFLATES R2_max. Here we
+    fill each uncovered band with a conservative (high) v by monotone extrapolation of the increasing
+    v-vs-band trend among covered bands — never below the largest covered v. Returns {band_idx: v}.
+    """
+    covered = curve[curve["v"].notna()][["band_idx", "v"]].sort_values("band_idx")
+    if len(covered) == 0:
+        return {}
+    idx = covered["band_idx"].to_numpy(dtype=float)
+    v = covered["v"].to_numpy(dtype=float)
+    vmax = float(v.max())
+    slope = max(float(np.polyfit(idx, v, 1)[0]), 0.0) if len(covered) >= 2 else 0.0
+    top_idx, top_v = float(idx[-1]), float(v[-1])
+    covered_set = {int(i) for i in idx}
+    fill = {}
+    for b in range(len(edges) - 1):
+        if p[b] > 0 and b not in covered_set:
+            fill[b] = max(vmax, top_v + slope * (b - top_idx)) if b > top_idx else vmax
+    return fill
+
+
+def level_reweighted_var_epsilon(per_day, dataset_labels, edges=AQI_BAND_EDGES,
+                                 impute_uncovered=False):
     """Var(eps)_dataset = sum_m p(m) * v(m), reweighting reference noise to the dataset's own p(m).
 
-    Only bands present in BOTH the reference curve (v) and the dataset (p) are used; p is
-    renormalised over those shared bands. Returns (var_eps_reweighted, merged_curve_dataframe).
+    `impute_uncovered=False` (default): only bands present in BOTH the reference curve (v) and the
+    dataset (p) are used, and p is renormalised over those covered bands. This is the OPTIMISTIC
+    estimate — it silently drops any high-AQI band the reference sample missed, understating Var(eps)
+    and inflating R2_max.
+
+    `impute_uncovered=True`: uncovered dataset bands are filled with a conservative (high) v via
+    `_impute_uncovered_v`, and p is reweighted over ALL bands with label mass. This is the tighter,
+    more honest CONSERVATIVE estimate (a lower R2_max). Report the two as a range.
+
+    Returns (var_eps_reweighted, merged_curve_dataframe).
     """
     curve = conditional_noise_curve(per_day, edges)
     p = _label_hist(dataset_labels, edges)
     curve = curve.copy()
     curve["p_dataset"] = curve["band_idx"].map(lambda b: p[b])
+    if impute_uncovered:
+        vmap = {int(r.band_idx): float(r.v) for _, r in curve.iterrows() if np.isfinite(r.v)}
+        vmap.update(_impute_uncovered_v(curve, p, edges))
+        bands = [b for b in range(len(edges) - 1) if p[b] > 0 and b in vmap]
+        if not bands:
+            return float("nan"), curve
+        w = np.array([p[b] for b in bands], dtype=float)
+        w = w / w.sum()
+        var_eps = float(np.sum(w * np.array([vmap[b] for b in bands], dtype=float)))
+        return var_eps, curve
     shared = curve[curve["p_dataset"] > 0]
     if shared["p_dataset"].sum() == 0 or len(shared) == 0:
         return float("nan"), curve
@@ -246,7 +297,9 @@ def compute_ceiling(hourly, dataset_labels, var_labels, station_col="location_id
             "No station-days had >= %d hourly readings, so the ceiling can't be estimated. "
             "Check that Internet is On and the OpenAQ key is valid, widen the date window, "
             "or lower min_hours." % min_hours)
-    var_eps, curve = level_reweighted_var_epsilon(per_day, dataset_labels, edges)
+    var_eps, curve = level_reweighted_var_epsilon(per_day, dataset_labels, edges)          # optimistic
+    var_eps_cons, _ = level_reweighted_var_epsilon(per_day, dataset_labels, edges,
+                                                   impute_uncovered=True)                  # conservative
     devs = within_day_deviations(hourly, station_col, time_col, ugm3_col, min_hours, table)
     out = error_ceiling(var_eps, var_labels, deviations=devs, coverage=coverage)
     out.update(bootstrap_r2max_ci(per_day, dataset_labels, var_labels, edges, n_boot, seed))
@@ -259,7 +312,25 @@ def compute_ceiling(hourly, dataset_labels, var_labels, station_col="location_id
     p = _label_hist(dataset_labels, edges)
     covered = set(int(b) for b in curve.loc[curve["v"].notna(), "band_idx"]) if len(curve) else set()
     out["p_mass_covered"] = float(sum(p[b] for b in range(len(p)) if b in covered))
+    # Honest RANGE: R2_max is the OPTIMISTIC end (drops uncovered high bands); R2_max_conservative
+    # imputes them with a high v (a tighter, lower ceiling). The true ceiling lies between. When
+    # coverage is incomplete we flag the point estimate as optimistic so no one quotes it as precise.
+    if np.isfinite(var_eps_cons):
+        out["var_epsilon_conservative"] = float(var_eps_cons)
+        out["R2_max_conservative"] = float(np.clip(1.0 - var_eps_cons / var_labels, 0.0, 1.0))
+    out["ceiling_is_optimistic"] = bool(out["p_mass_covered"] < 0.98)
     return out
+
+
+def per_split_r2max(var_epsilon: float, var_labels_by_split: dict) -> dict:
+    """R2_max for each split from its OWN label variance (the ceiling is split-specific).
+
+    var_labels_by_split : {split_name: Var(y_on_that_split)}, e.g. from each split/fold's SD_y**2.
+    A split's R2 must only ever be compared to ITS OWN ceiling — a single global R2_max is misleading
+    because R2_max scales with the split's label spread.
+    """
+    return {s: float(np.clip(1.0 - var_epsilon / vy, 0.0, 1.0))
+            for s, vy in var_labels_by_split.items() if vy and np.isfinite(vy) and vy > 0}
 
 
 # ---------------------------------------------------------------------------
@@ -271,20 +342,35 @@ def _get(url, api_key, params=None, timeout=60):
     return r.json()
 
 
-def find_pm25_sensors(api_key, n_locations=80, page_limit=100, max_pages=15, max_per_country=10):
+# Countries that routinely reach the HIGH-AQI bands (150-500+), where within-day PM2.5 swings are
+# largest. Sampling these deliberately (not just "whatever OpenAQ lists first") is what makes the
+# v(m) curve cover the high bands, so R2_max stops being an optimistic upper bound. Not exhaustive —
+# a pragmatic AQI-level stratification for the free OpenAQ tier.
+HIGH_AQI_COUNTRIES = ("IN", "PK", "BD", "NP", "CN", "MN", "ID", "VN", "IR", "IQ", "AE", "KW", "US")
+
+
+def find_pm25_sensors(api_key, n_locations=80, page_limit=100, max_pages=15, max_per_country=10,
+                      priority_countries=HIGH_AQI_COUNTRIES, priority_max_per_country=None):
     """Return a list of (location_id, sensor_id, country) for PM2.5 sensors worldwide.
 
     `max_per_country` caps how many stations come from any one country, so the sample is spread
-    across regions (region-stratified) rather than dominated by whichever country OpenAQ lists
-    first — a more representative within-day variance estimate.
+    across regions (region-stratified) rather than dominated by whichever country OpenAQ lists first.
+
+    `priority_countries` (high-pollution regions) get a HIGHER cap (`priority_max_per_country`,
+    default 2x) so the sample deliberately reaches the high-AQI bands — an AQI-LEVEL stratification,
+    not just a geographic one. This directly addresses the ceiling's high-band under-coverage: without
+    it the reference sample skews low-AQI and R2_max comes out too optimistic.
     """
+    priority = set(priority_countries or ())
+    pcap = priority_max_per_country if priority_max_per_country is not None else max(max_per_country * 2, max_per_country)
     found, per_country = [], {}
     for page in range(1, max_pages + 1):
         data = _get(f"{OPENAQ_BASE}/locations", api_key,
                     {"parameters_id": PM25_PARAMETER_ID, "limit": page_limit, "page": page})
         for loc in data.get("results", []):
             country = (loc.get("country") or {}).get("code")
-            if per_country.get(country, 0) >= max_per_country:
+            cap = pcap if country in priority else max_per_country
+            if per_country.get(country, 0) >= cap:
                 continue
             for s in loc.get("sensors", []):
                 if s.get("parameter", {}).get("id") == PM25_PARAMETER_ID:
@@ -313,13 +399,18 @@ def fetch_sensor_hours(api_key, sensor_id, date_from, date_to, limit=1000):
 
 
 def fetch_openaq_hourly(api_key, date_from, date_to, n_locations=80, pause=0.2,
-                        max_per_country=10) -> pd.DataFrame:
-    """Collect hourly PM2.5 (ug/m3) for a region-stratified sample of stations. Tidy DataFrame.
+                        max_per_country=10, priority_countries=HIGH_AQI_COUNTRIES,
+                        priority_max_per_country=None) -> pd.DataFrame:
+    """Collect hourly PM2.5 (ug/m3) for a region- AND AQI-level-stratified sample of stations.
 
     Columns: location_id, country, datetime, pm25_ugm3. Feed this to `compute_ceiling` /
-    `within_day_aqi_variance`. Free key: https://explore.openaq.org (Account -> API keys).
+    `within_day_aqi_variance`. `priority_countries` get a higher per-country cap so the sample
+    reaches the high-AQI bands (see `find_pm25_sensors`). Free key: https://explore.openaq.org
+    (Account -> API keys).
     """
-    sensors = find_pm25_sensors(api_key, n_locations=n_locations, max_per_country=max_per_country)
+    sensors = find_pm25_sensors(api_key, n_locations=n_locations, max_per_country=max_per_country,
+                                priority_countries=priority_countries,
+                                priority_max_per_country=priority_max_per_country)
     frames = []
     for loc_id, sensor_id, country in sensors:
         try:

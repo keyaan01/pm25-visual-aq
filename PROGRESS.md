@@ -4,14 +4,30 @@
 > later session, **read this first**, then `docs/` for details and the approved plan at
 > `~/.claude/plans/this-is-the-output-steady-hearth.md`.
 
-**Last updated (2026-09-25):** **The leakage story is done, verified, and documented.** The headline
-experiment ran as one Kaggle *commit* (headless) job and produced the project's central result:
+**Last updated (2026-09-28):** **Cross-validation is in, a second correctness audit re-verified
+everything, and the accuracy levers + C2 hardening are built.** The story so far:
 
-- Honest **station-grouped R² = 0.220** (MAE 54.2, Spearman 0.649, coverage 0.872).
-- Leaky **random R² = 0.759** → **Δ_leak(R²) = 0.539**. The random split even exceeds the paper's 0.55;
-  no station-disjoint split reaches 0.55 (shipped 0.378, geographic −0.079).
-- Causal clincher: within the random test set, **contaminated R² = 0.762 vs clean R² = −0.86** — the
-  inflation lives entirely in the leaked photos.
+- **Honest, cross-validated R² = 0.385 ± 0.19** (5 station-disjoint GroupKFold folds; 95% CI
+  [0.196, 0.574]; MAE 46.3; **coverage 0.895** — the conformal intervals are validated). The earlier
+  single-split **0.220** was one hard, high-variance draw (≈ the worst fold, 0.152).
+- Leaky **random R² = 0.759** → above the paper's 0.55 **and above the entire honest CV range**. Lead
+  with the variance-free **Δ_leak(MAE) = 27.8 AQI**; Δ_leak(R²) = 0.37–0.54 depending on the honest
+  endpoint. **Honest correction:** one honest fold reached **0.574 > 0.55**, so we do NOT claim 0.55 is
+  unreachable honestly — the leakage proof is the causal test + the leaky 0.759 exceeding the whole CI.
+- Causal clincher: within the random test set, **contaminated R² = 0.762 vs clean R² = −0.86** (the
+  −0.86 is variance-amplified on a small low-variance clean subset; lead with the MAE gap 25.4 vs 30.4).
+  The inflation lives entirely in the leaked photos.
+
+**Audit 2 (2026-09-28) — 3 read-only agents re-checked everything.** Verdict: R² (single + CV),
+leakage, and the causal test are **computed correctly and honestly — no result-affecting bug.** The one
+over-statement was **C2**: R²_max ≈ 0.977 is a loose, optimistic upper bound (small/low-AQI sample), now
+reframed as a range (≈0.90–0.95) with a conservative estimate + `p_mass_covered` flag. Reporting polish
+applied across docs (±-convention, dual Δ_leak led by MAE, variance-amplification note, correlated-fold
+CI caveat). **Accuracy levers built** (honest, cal-selected): EMA + flip-TTA + seed ensembling in
+`train.py`/`leakage.py` (config flags; `10_crossval.ipynb` has an `ACCURACY_PUSH` toggle). **Guards
+added:** end-to-end label↔prediction alignment assert, shipped station-disjointness assert,
+`physics.verify_cache_alignment`; notebook-06 now applies isotonic (matches the ledger). New
+`tests/smoke_accuracy.py` + C2 gating tests; **all 5 smoke suites pass.**
 
 A **3-agent read-only correctness audit** (data/physics, model/loss/training, splits/calibration/
 metrics/leakage) found **no result-affecting bug**: leakage prediction↔row ordering correct, physics
@@ -88,8 +104,8 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,096 rows after dedup, 3,259 station
 | 5 | Training — pinball + MSE point head, log-target quantiles (§3.7, §3.12) | ✅ built + tested |
 | 6 | Conformal calibration + evaluation (§3.8, §3.11) | ✅ built + tested (coverage ≈ 0.90) |
 | A | Leakage measurement (the "story") | ✅ **run + verified + documented** (Δ_leak=0.539) |
-| 7 / C2 | Error ceiling via OpenAQ (§3.10) | ✅ built + **first run in** (R²_max≈0.977, upper bound); cleaned (NaN drop + broader sample) → user re-runs 07 for clean floor/v(m) |
-| CV | Leakage-safe 5-fold cross-validation (§3.11) | ✅ **built + smoke-tested** (`src/crossval.py`, `10_crossval.ipynb`, GroupKFold by station); user runs once (~5–6h GPU) |
+| 7 / C2 | Error ceiling via OpenAQ (§3.10) | ✅ built + first run in; R²_max≈0.977 is a **loose/optimistic** upper bound → reframed as a RANGE (≈0.90–0.95) + conservative estimate + high-AQI-targeted fetch; user re-runs 07 for a clean number |
+| CV | Leakage-safe 5-fold cross-validation (§3.11) | ✅ **run + done**: R²=0.385±0.19, coverage 0.895 (`10_crossval.ipynb`, GroupKFold by station); accuracy-push toggle (EMA/TTA/ensemble) added for an optional higher-R² run |
 | 8 / C3 | Abstention via ExDark/DTD/Indoor (§3.9) | ⏳ after C2 |
 | 9 | Ablations (§3.11) | ⏳ optional |
 | 10 | Frontend demo (Gradio) | ⏳ needs trained model |
@@ -114,9 +130,18 @@ Dataset: `DeadCardassian/PM25Vision` (HF, 11,096 rows after dedup, 3,259 station
 
 ## Immediate next step
 
-Build **C2 (error ceiling)**: upgrade `src/ceiling.py` + `src/aqi.py` (see "Next" above), smoke-test on
-synthetic hourly data, then hand off to the user to run with an OpenAQ key. Append the R²_max + sensitivity
-band to `docs/RESULTS.md` when it arrives.
+Two user runs (both optional / when convenient), then C3:
+1. **Clean C2 re-run:** run `07_error_ceiling.ipynb` with a free OpenAQ key — it now targets
+   high-pollution regions and prints an honest optimistic→conservative range; paste it → finalise C2 in
+   `docs/RESULTS.md` (replacing the provisional ≈0.90–0.95 range).
+2. **(Optional) accuracy push:** run `10_crossval.ipynb` with `ACCURACY_PUSH = True` (EMA + TTA + seed
+   ensemble per fold, ~15 h on a T4) → paste the new mean ± CI → add as a **new row** beside the honest
+   baseline in `docs/RESULTS.md`.
+3. Then build **C3 (abstention)**: `src/abstain.py` + `notebooks/08_abstention.ipynb` (OOD gate +
+   log-width uncertainty gate; ExDark/DTD/MIT-Indoor). Then Phase 10 Gradio demo.
+
+The `docs/PROJECT_EXPLAINED.pdf` (detailed "what every result means" write-up) is generated for the
+teacher-facing explanation.
 
 ## Test commands (laptop, no GPU)
 `python tests/_build_fixture.py` then `python tests/smoke_phase1.py` and `python tests/smoke_core.py`.
