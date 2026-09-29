@@ -1305,12 +1305,15 @@ plt.savefig(os.path.join(out_root, "risk_coverage.png"), dpi=120, bbox_inches="t
 - **DTD** describable textures (featureless) — far-OOD. search *"Describable Textures Dataset DTD"*.
 - **MIT-Indoor** (indoor scenes) — near-OOD. search *"Indoor Scenes CVPR 2019"*.
 
-The cell below **prints every folder under `/kaggle/input` with its image count**, then finds each set by a
-**case-insensitive keyword anywhere in the path** (any uploader, any nesting, any file-name casing — it does
-NOT need an `images/` subfolder). If a set still says MISSING, copy one of the printed paths into the
-`MANUAL` dict at the top of the cell (e.g. `MANUAL["DTD"] = "/kaggle/input/..."`) and re-run **just this
-cell** — no retrain, the model is already loaded. Each image goes through the SAME `physics.five_channel`
-pipeline as a real photo.
+The cell below **walks all of `/kaggle/input` and prints every image-bearing folder with its recursive
+count**, then finds each set by matching its **folder NAME at any nesting depth** (works whether the
+datasets are separate slugs or all nested under one `datasets/<uploader>/<slug>` parent, any casing, no
+`images/` subfolder needed). If a name has no keyword it falls back to the **category-structure** of the
+folder (DTD's texture names, MIT-Indoor's 67 scenes) and, for ExDark, to **darkness**; decoys
+(PM25Vision / scripts) are never selected. If a set still says MISSING, copy one of the printed paths into
+the `MANUAL` dict at the top of the cell (e.g. `MANUAL["DTD"] = "/kaggle/input/..."`) and re-run **just
+this cell** — no retrain, the model is already loaded. Each image goes through the SAME
+`physics.five_channel` pipeline as a real photo.
 
 > **Expect this honestly:** the deployed handcrafted gate should score **near-chance on MIT-Indoor** — a
 > lit indoor photo is bright and detailed, so `max(dark, flat)` does not fire. Indoor is a *documented
@@ -1318,44 +1321,119 @@ pipeline as a real photo.
 > photos (that is exactly the tradeoff we quantify)."""),
     ("code", """import glob as _g
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".ppm", ".bmp", ".gif", ".webp", ".tif", ".tiff")  # case-insensitive
+INPUT_ROOT = "/kaggle/input"
 
-def _img_count(root):
-    n = 0
-    for _dp, _dn, fns in os.walk(root):
-        n += sum(f.lower().endswith(IMG_EXTS) for f in fns)
-        if n > 5000: break                       # enough to know it's an image folder
-    return n
-
-# 1) Show EXACTLY what is mounted, with image counts -- so a MISSING is never a mystery.
-ROOTS = sorted(p for p in _g.glob("/kaggle/input/*") if os.path.isdir(p))
-print("Attached under /kaggle/input  (folder -> #images):")
-for r in ROOTS:
-    print("   %-52s %d" % (os.path.basename(r), _img_count(r)))
-
-# 2) Match each OOD set by keyword ANYWHERE in the mounted path (case-insensitive), choosing the matching
-#    folder with the MOST images. Slug-agnostic AND subfolder-agnostic -- no exact paths, no 'images/' needed.
+# What each OOD set is called (matched against a folder's OWN name, case-insensitive).
 KEYWORDS = {
-    "ExDark":     ("exdark", "exclusively", "lowlight", "low-light", "dark"),
+    "ExDark":     ("exdark", "exclusively", "lowlight", "low-light"),
     "DTD":        ("dtd", "describable", "texture"),
-    "MIT-Indoor": ("indoor", "cvpr", "mitindoor"),
+    "MIT-Indoor": ("indoor", "cvpr", "mitindoor", "mit-indoor", "mit_indoor"),
 }
 NEAR_OOD = {"MIT-Indoor"}          # indoor is 'near' OOD (still a photo); night/textures are 'far'
-MANUAL = {}                        # ESCAPE HATCH: if a set still misses, paste a path printed above, e.g.
-                                   #   MANUAL["DTD"] = "/kaggle/input/describable-textures-dataset/dtd"
+# Structure fallback: used ONLY when NO folder name contains a keyword -- a dir whose subfolders are named
+# like this set's known categories (>= SIG_MIN_HITS). Specific enough that unrelated sets cannot match.
+SIG_TOKENS = {
+    "MIT-Indoor": ("bedroom","kitchen","bathroom","office","livingroom","living_room","library","classroom",
+                   "corridor","lobby","warehouse","garage","restaurant","museum","closet","pantry","nursery",
+                   "elevator","staircase","gym","bakery","bookstore","casino","auditorium","airport","church",
+                   "cloister","laundromat","greenhouse","florist"),
+    "DTD":        ("banded","blotchy","braided","bubbly","bumpy","chequered","cobwebbed","cracked",
+                   "crosshatched","crystalline","dotted","fibrous","flecked","freckled","frilly","gauzy","grid",
+                   "grooved","honeycombed","interlaced","knitted","lacelike","lined","marbled","matted","meshed",
+                   "paisley","perforated","pitted","pleated","porous","scaly","smeared","spiralled","sprinkled",
+                   "stained","stratified","striped","studded","swirly","veined","waffled","woven","wrinkled",
+                   "zigzagged"),
+}
+SIG_MIN_HITS = 4
+DECOY_TOKENS = ("pm25","pm2-5","pm2_5","pm_25","pm2.5","pmvision","script","notebook","wheel",".whl",
+                "utils","tools","/code","/src","checkpoint")
+MANUAL = {}   # ESCAPE HATCH: paste a path printed in the tree below, e.g.
+              #   MANUAL["MIT-Indoor"] = "/kaggle/input/some-mount/Images"   ; then re-run THIS cell.
+
+# Walk /kaggle/input ONCE: each dir's recursive image count + its subfolders (a dataset ROOT is credited
+# with images in all its category subfolders, so we can pick the root and load every category).
+_MAX_DIRS, _CAP = 60000, 40000
+def _is_img(fn): return fn.lower().endswith(IMG_EXTS)
+def _norm(p):    return p.replace(chr(92), "/").rstrip("/")
+def _depth(p):   return _norm(p).count("/")
+def _scan(root):
+    direct, children, seen = {}, {}, 0
+    for dp, dns, fns in os.walk(root):
+        direct[dp], children[dp] = sum(_is_img(f) for f in fns), list(dns); seen += 1
+        if seen > _MAX_DIRS: print("   (note: stopped after %d dirs -- very large mount)" % _MAX_DIRS); break
+    total = {}
+    for d in sorted(direct, key=lambda p: p.count(os.sep), reverse=True):
+        total[d] = min(direct[d] + sum(total.get(os.path.join(d, c), 0) for c in children.get(d, [])), _CAP)
+    return direct, total, children
+if os.path.isdir(INPUT_ROOT):
+    DIRECT, TOTAL, CHILDREN = _scan(INPUT_ROOT)
+else:
+    print("WARNING: %s missing -- attach the datasets (Add Input) or set MANUAL paths." % INPUT_ROOT)
+    DIRECT, TOTAL, CHILDREN = {}, {}, {}
+
+def _is_decoy(p):      low = _norm(p).lower(); return any(t in low for t in DECOY_TOKENS)
+def _name_has(p, kws): return any(k in os.path.basename(_norm(p)).lower() for k in kws)
+def _img_dirs():       return [d for d in TOTAL if TOTAL[d] > 0]
+_ALL_KW = tuple(k for ks in KEYWORDS.values() for k in ks)
+def _sample_brightness(d, k=12):
+    files = sorted(os.path.join(dp, f) for dp, _, fns in os.walk(d) for f in fns if _is_img(f))
+    if not files: return None
+    vals = []
+    for f in files[:: max(1, len(files) // k)][:k]:
+        try: vals.append(np.asarray(Image.open(f).convert("L").resize((32, 32)), float).mean() / 255.0)
+        except Exception: pass
+    return float(np.mean(vals)) if vals else None
 
 def find_dir(name):
     if MANUAL.get(name): return MANUAL[name]
-    cands = [r for r in ROOTS if any(k in r.lower() for k in KEYWORDS[name]) and _img_count(r) > 0]
-    return max(cands, key=_img_count) if cands else None
+    kws = KEYWORDS[name]
+    # (1) keyword in the folder's OWN name -> shallowest image-bearing dir = the dataset ROOT (nesting- &
+    #     slug-agnostic; handles a shared 'datasets/<uploader>/<slug>' parent).
+    cands = [d for d in _img_dirs() if _name_has(d, kws) and not _is_decoy(d)]
+    if cands:
+        cands.sort(key=lambda d: (_depth(d), -TOTAL[d])); return cands[0]
+    # (2) category-structure signature (name lacks the keyword, e.g. 'MITImages').
+    toks = SIG_TOKENS.get(name)
+    if toks:
+        best, best_hits = None, 0
+        for d in TOTAL:
+            if _is_decoy(d) or TOTAL[d] == 0: continue
+            hits = sum(any(t in s.lower() for t in toks) for s in CHILDREN.get(d, []))
+            if hits >= SIG_MIN_HITS and hits > best_hits: best, best_hits = d, hits
+        if best: return best
+    # (3) ExDark only: keyword-less low-light folder -> shallowest sufficiently-dark image folder.
+    if name == "ExDark":
+        darks = []
+        for d in _img_dirs():
+            if _is_decoy(d) or _name_has(d, _ALL_KW): continue
+            b = _sample_brightness(d)
+            if b is not None and b < 0.20: darks.append((_depth(d), b, d))
+        return min(darks, key=lambda t: (t[0], t[1]))[2] if darks else None
+    return None
 
 def load_images(d, limit=300):
-    if not d: return []
-    files = [f for f in _g.glob(os.path.join(d, "**", "*"), recursive=True) if f.lower().endswith(IMG_EXTS)]
+    if not d or not os.path.isdir(d): return []
+    files = sorted(os.path.join(dp, f) for dp, _, fns in os.walk(d) for f in fns if _is_img(f))
+    if not files: return []
     imgs = []
-    for f in sorted(files)[:limit]:
+    for f in files[:: max(1, len(files) // limit)][:limit]:   # stride across ALL categories, not the first
         try: imgs.append(Image.open(f).convert("RGB"))
         except Exception: pass
     return imgs
+
+# MANDATORY diagnostic: every image-bearing folder's full path + recursive count (to depth 3), so a
+# MISSING is never invisible and MANUAL is always one copy-paste away (this is the nesting fix).
+print("Image-bearing folders under %s   (full path -> recursive #images):" % INPUT_ROOT)
+shown = 0
+for d in sorted(TOTAL):
+    if TOTAL[d] == 0 or _depth(d) - _depth(INPUT_ROOT) > 3: continue
+    print("   %-62s %7d%s" % (d, TOTAL[d], "+" if TOTAL[d] >= _CAP else "")); shown += 1
+    if shown >= 100: print("   ... (more below)"); break
+if not shown: print("   (none found)")
+print("Auto-resolved roots:")
+for name in KEYWORDS:
+    d = find_dir(name)
+    print("   %-11s -> %s" % (name, d or "MISSING  (paste a path above into MANUAL['%s'] & re-run)" % name))
 
 @torch.no_grad()
 def scores_for(images):   # returns (Mahalanobis feature scores, handcrafted scores) per image
